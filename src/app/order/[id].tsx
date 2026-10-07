@@ -45,7 +45,7 @@ function OrderDetailScreen() {
     if (next === 'cancelled' && !(await confirm('Cancel this order?', 'The order is cancelled and the payment is marked as refunded.', 'Cancel order'))) return;
     setSaving(true);
     try {
-      await updateOrderStatus(order.id, next);
+      await updateOrderStatus(order.id, next, order.status);
       toast({ title: `Order marked as ${ORDER_STATUS_LABEL[next].toLowerCase()}`, tone: 'success' });
       data.reload();
     } catch (e) {
@@ -68,7 +68,7 @@ function OrderDetailScreen() {
               <Text style={{ fontSize: 26, lineHeight: 32, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{formatPrice(order.total)}</Text>
               <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
                 <StatusBadge status={order.status} />
-                <Pill label={`Payment ${order.payment_status}`} tone={order.payment_status === 'paid' ? 'success' : order.payment_status === 'refunded' ? 'sale' : 'muted'} />
+                <Pill label={`Payment ${order.payment_status}`} tone={order.payment_status === 'paid' ? 'success' : order.payment_status === 'refunded' || order.payment_status === 'failed' ? 'sale' : 'muted'} />
               </View>
             </View>
           </View>
@@ -165,7 +165,8 @@ function OrderDetailScreen() {
 
         <Card style={{ gap: 4 }}>
           <CardTitle title="Payment" icon="credit-card" />
-          <Text tone="muted">{order.payment_method?.brand ?? 'Card'} ending in {order.payment_method?.last4 ?? '••••'}</Text>
+          <Text tone="muted">{order.payment_method?.brand ?? 'Mobile money'}{order.payment_method?.last4 ? ` ending in ${order.payment_method.last4}` : ''}</Text>
+          {order.payment_reference ? <Text variant="small" tone="muted" selectable>Snippe reference: {order.payment_reference}</Text> : null}
           <Text>Status: <Text style={{ fontWeight: '700', textTransform: 'capitalize' }}>{order.payment_status}</Text></Text>
         </Card>
       </ScrollView>

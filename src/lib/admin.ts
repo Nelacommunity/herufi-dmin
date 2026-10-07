@@ -143,12 +143,32 @@ export async function getOrder(id: string) {
   return { order, customer };
 }
 
-export async function updateOrderStatus(id: string, status: OrderStatus) {
+export async function updateOrderStatus(id: string, status: OrderStatus, from?: OrderStatus) {
   if (!ORDER_STATUSES.includes(status)) throw new AdminError('Unknown status');
   const update: Record<string, string> = { status };
   if (status === 'cancelled') update.payment_status = 'refunded';
   const { error } = await supabase.from('orders').update(update).eq('id', id);
   if (error) fail(error, "We couldn't update this order.");
+  await notifyCustomer(id, status, from);
+}
+
+/**
+ * Ask the website to text the customer (Tegasms) about the new status. The website holds the SMS credentials and
+ * re-checks that we are staff and that the order really changed. Best effort: a failed SMS never blocks the update.
+ */
+async function notifyCustomer(orderId: string, to: OrderStatus, from?: OrderStatus) {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) return;
+    await fetch(`${SITE.url}/api/admin/order-notify`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_id: orderId, from, to }),
+    });
+  } catch {
+    /* the customer can still see the new status in the app */
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

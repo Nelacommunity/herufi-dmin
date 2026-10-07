@@ -170,6 +170,8 @@ export interface Order {
   shipping_address: Omit<Address, "id" | "label" | "is_default">;
   payment_method: { brand?: string; last4?: string };
   payment_status: string;
+  /** Snippe payment reference, set once the customer starts paying. */
+  payment_reference?: string | null;
   created_at: string;
   updated_at: string;
   user_id: string | null;
