@@ -19,7 +19,7 @@ import { useToast } from '@/providers/toast';
 import { radius, useTheme } from '@/theme';
 
 type Img = { image_url: string; alt_text: string };
-type Variant = { id?: string; name: string; value: string; additional_price: string; stock_quantity: string };
+type Variant = { id?: string; name: string; value: string; additional_price: string; stock_quantity: string; image_url: string | null };
 
 export default function ProductScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -71,7 +71,7 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
   const [dims, setDims] = useState({ l: product ? String(product.length_cm) : '20', w: product ? String(product.width_cm) : '15', h: product ? String(product.height_cm) : '10' });
   const [methods, setMethods] = useState<DeliveryMethod[]>(product?.shipping_methods ?? ['standard', 'express', 'sea']);
   const [images, setImages] = useState<Img[]>(product?.images.map((i) => ({ image_url: i.image_url, alt_text: i.alt_text })) ?? []);
-  const [variants, setVariants] = useState<Variant[]>(product?.variants.map((v) => ({ id: v.id, name: v.name, value: v.value, additional_price: String(v.additional_price), stock_quantity: String(v.stock_quantity) })) ?? []);
+  const [variants, setVariants] = useState<Variant[]>(product?.variants.map((v) => ({ id: v.id, name: v.name, value: v.value, additional_price: String(v.additional_price), stock_quantity: String(v.stock_quantity), image_url: v.image_url ?? null })) ?? []);
   const [urlInput, setUrlInput] = useState('');
   const [uploading, setUploading] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -142,7 +142,7 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
       sku: sku || null, stock_quantity: Number(stock) || 0, is_featured: featured, is_active: active,
       weight_kg: Number(weight), length_cm: Number(dims.l), width_cm: Number(dims.w), height_cm: Number(dims.h), shipping_methods: methods,
       images,
-      variants: variants.filter((v) => v.name.trim() || v.value.trim()).map((v) => ({ ...v, additional_price: Number(v.additional_price) || 0, stock_quantity: Number(v.stock_quantity) || 0 })),
+      variants: variants.filter((v) => v.name.trim() || v.value.trim()).map((v) => ({ ...v, additional_price: Number(v.additional_price) || 0, stock_quantity: Number(v.stock_quantity) || 0, image_url: v.image_url && images.some((img) => img.image_url === v.image_url) ? v.image_url : null })),
     };
     setSaving(true);
     try {
@@ -275,8 +275,8 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
 
           {/* Variants */}
           <Card style={{ gap: 12 }}>
-            <CardTitle title="Variants" icon="grid" right={<Button size="sm" variant="secondary" icon="plus" title="Add" onPress={() => setVariants([...variants, { name: variants[0]?.name ?? 'Size', value: '', additional_price: '0', stock_quantity: '0' }])} />} />
-            <Text variant="small" tone="muted">Use one option type per product (e.g. Size or Color). With variants, stock is tracked per variant.</Text>
+            <CardTitle title="Variants" icon="grid" right={<Button size="sm" variant="secondary" icon="plus" title="Add" onPress={() => setVariants([...variants, { name: variants[0]?.name ?? 'Size', value: '', additional_price: '0', stock_quantity: '0', image_url: null }])} />} />
+            <Text variant="small" tone="muted">Use one option type per product (e.g. Size or Color). With variants, stock is tracked per variant. Link a photo to a variant and the store shows it when a shopper picks that option; the first image stays the cover.</Text>
             {variants.length ? variants.map((v, i) => (
               <View key={v.id ?? `new-${i}`} style={[styles.variant, { backgroundColor: colors.surface2 }]}>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -289,6 +289,23 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
                   <SmallBtn icon="arrow-up" label="Move up" disabled={i === 0} onPress={() => setVariants(move(variants, i, -1))} />
                   <SmallBtn icon="trash-2" label="Remove variant" danger onPress={() => setVariants(variants.filter((_, j) => j !== i))} />
                 </View>
+                {images.length > 0 && (
+                  <View style={{ gap: 6 }}>
+                    <Text variant="small" tone="muted">Photo for {v.value.trim() || 'this option'}</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+                      <Pressable onPress={() => setVariants(variants.map((x, j) => (j === i ? { ...x, image_url: null } : x)))} accessibilityLabel="Use the cover photo"
+                        style={[styles.photoPick, { borderColor: !v.image_url ? colors.foreground : colors.border, backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' }]}>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: !v.image_url ? colors.foreground : colors.muted }}>Cover</Text>
+                      </Pressable>
+                      {images.map((img, n) => (
+                        <Pressable key={`${img.image_url}-${n}`} onPress={() => setVariants(variants.map((x, j) => (j === i ? { ...x, image_url: img.image_url } : x)))} accessibilityLabel={`Use image ${n + 1}`}
+                          style={[styles.photoPick, { borderColor: v.image_url === img.image_url ? colors.foreground : 'transparent', opacity: v.image_url === img.image_url ? 1 : 0.7 }]}>
+                          <Image source={img.image_url} style={StyleSheet.absoluteFill} contentFit="cover" />
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
               </View>
             )) : (
               <View style={{ padding: 14, borderRadius: radius.md, backgroundColor: colors.surface2 }}>
@@ -378,5 +395,6 @@ const styles = StyleSheet.create({
   area: { height: 110, paddingTop: 12 },
   variant: { padding: 10, borderRadius: radius.md, gap: 8 },
   compact: { height: 44 },
+  photoPick: { width: 46, height: 46, borderRadius: radius.sm, borderWidth: 2, overflow: 'hidden' },
   bar: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth },
 });

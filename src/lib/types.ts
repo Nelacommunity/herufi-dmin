@@ -25,6 +25,8 @@ export interface ProductVariant {
   additional_price: number;
   stock_quantity: number;
   sort_order: number;
+  /** Photo shown when this variant is chosen (one of the product's images). The first product image stays the cover. */
+  image_url?: string | null;
 }
 
 /** Shape used by cards and grids. */

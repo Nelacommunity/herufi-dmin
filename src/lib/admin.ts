@@ -193,6 +193,9 @@ export async function getProduct(id: string): Promise<Product | null> {
   if (error) fail(error, 'Could not load this product');
   if (!data) return null;
   const p = data as Product;
+  // Variant photos come from migration 0011; fetched separately so older databases keep working.
+  const photos = p.variants?.length ? await supabase.from('product_variants').select('id, image_url').eq('product_id', id) : null;
+  const photo = new Map(((photos && !photos.error ? photos.data : []) as { id: string; image_url: string | null }[]).map((v) => [v.id, v.image_url]));
   return {
     ...p,
     price: Number(p.price),
@@ -200,7 +203,7 @@ export async function getProduct(id: string): Promise<Product | null> {
     weight_kg: Number(p.weight_kg ?? 0.5), length_cm: Number(p.length_cm ?? 20), width_cm: Number(p.width_cm ?? 15), height_cm: Number(p.height_cm ?? 10),
     shipping_methods: p.shipping_methods ?? ['standard', 'express', 'sea'],
     images: [...(p.images ?? [])].sort((a, b) => a.sort_order - b.sort_order),
-    variants: [...(p.variants ?? [])].sort((a, b) => a.sort_order - b.sort_order).map((v) => ({ ...v, additional_price: Number(v.additional_price) })),
+    variants: [...(p.variants ?? [])].sort((a, b) => a.sort_order - b.sort_order).map((v) => ({ ...v, additional_price: Number(v.additional_price), image_url: photo.get(v.id) ?? null })),
   };
 }
 
@@ -210,7 +213,7 @@ export type ProductPayload = {
   price: number; compare_at_price: number | null; sku: string | null; stock_quantity: number; is_featured: boolean; is_active: boolean;
   weight_kg: number; length_cm: number; width_cm: number; height_cm: number; shipping_methods: DeliveryMethod[];
   images: { image_url: string; alt_text: string }[];
-  variants: { id?: string; name: string; value: string; additional_price: number; stock_quantity: number }[];
+  variants: { id?: string; name: string; value: string; additional_price: number; stock_quantity: number; image_url?: string | null }[];
 };
 
 /** Same rules as the website's productSchema. Returns an error message, or null when valid. */
@@ -277,9 +280,15 @@ export async function saveProduct(payload: ProductPayload): Promise<string> {
     if (keep.length) del = del.not('id', 'in', `(${keep.join(',')})`);
     const { error: delVar } = await del;
     if (delVar) throw delVar;
+    // A variant photo must be one of this product's images; links to removed photos are dropped.
+    const imageUrls = new Set(images.map((img) => img.image_url));
+    let photos = true; // false once we learn the database predates 0011_variant_images.sql
     for (const [i, v] of variants.entries()) {
-      const data = { product_id: productId, name: v.name.trim(), value: v.value.trim(), additional_price: v.additional_price, stock_quantity: v.stock_quantity, sort_order: i };
-      const { error } = v.id ? await supabase.from('product_variants').update(data).eq('id', v.id) : await supabase.from('product_variants').insert(data);
+      const base = { product_id: productId, name: v.name.trim(), value: v.value.trim(), additional_price: v.additional_price, stock_quantity: v.stock_quantity, sort_order: i };
+      const write = (data: typeof base & { image_url?: string | null }) =>
+        v.id ? supabase.from('product_variants').update(data).eq('id', v.id) : supabase.from('product_variants').insert(data);
+      let { error } = await write(photos ? { ...base, image_url: v.image_url && imageUrls.has(v.image_url) ? v.image_url : null } : base);
+      if (error?.code === '42703' && photos) { photos = false; ({ error } = await write(base)); }
       if (error) throw error;
     }
 
@@ -564,4 +573,19 @@ export async function uploadImage(bucket: 'product-images' | 'category-images', 
   const { error } = await supabase.storage.from(bucket).upload(path, body, { contentType: mime, cacheControl: '31536000' });
   if (error) throw new AdminError(`Upload failed: ${error.message}`);
   return supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Bulk delete (super admins only; admin_bulk_delete() re-checks in the database)
+
+export type BulkKind = 'products' | 'categories' | 'coupons';
+
+export async function bulkDelete(kind: BulkKind, ids: string[]): Promise<number> {
+  const clean = [...new Set(ids)];
+  if (!clean.length) return 0;
+  if (clean.length > 500) throw new AdminError('Delete at most 500 items at a time.');
+  const { data, error } = await supabase.rpc('admin_bulk_delete', { p_kind: kind, p_ids: clean });
+  if (error) fail(error, "We couldn't delete these items.");
+  if (kind !== 'coupons') void refreshStore();
+  return Number(data ?? 0);
 }

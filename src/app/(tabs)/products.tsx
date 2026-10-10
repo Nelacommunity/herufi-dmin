@@ -3,8 +3,8 @@ import { ActivityIndicator, FlatList, Linking, Pressable, RefreshControl, View }
 import { router, useLocalSearchParams } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { Button, Divider, EmptyState, ErrorState, IconButton, Input, Sheet, Skeleton, Text } from '@/components/ui';
-import { errorMessage, FilterChips, Pill, Row, SearchField, Thumb, useReloadOnFocus, NoAccess } from '@/components/admin';
-import { adjustStock, listProducts, setProductActive, type ProductFilter, type ProductRow } from '@/lib/admin';
+import { confirm, errorMessage, FilterChips, Pill, Row, SearchField, SelectCircle, SelectionBar, Thumb, useReloadOnFocus, useSelection, NoAccess } from '@/components/admin';
+import { adjustStock, bulkDelete, listProducts, setProductActive, type ProductFilter, type ProductRow } from '@/lib/admin';
 import { LOW_STOCK, SITE } from '@/lib/constants';
 import { formatPrice } from '@/lib/format';
 import { usePaged } from '@/lib/use-paged';
@@ -23,8 +23,11 @@ export default function Products() {
 
 function ProductsScreen() {
   const { colors } = useTheme();
-  const { can } = useSession();
+  const { can, isSuper } = useSession();
   const toast = useToast();
+  // Multi-select + bulk delete: super admins only (admin_bulk_delete() enforces this in the database too).
+  const sel = useSelection();
+  const [deleting, setDeleting] = useState(false);
   const params = useLocalSearchParams<{ filter?: string }>();
   const initial = (FILTERS.map((f) => f.value) as string[]).includes(params.filter ?? '') ? (params.filter as ProductFilter) : 'all';
   const [filterState, setFilter] = useState<{ from?: string; value: ProductFilter }>({ from: params.filter, value: initial });
@@ -51,6 +54,23 @@ function ProductsScreen() {
     }
   }
 
+  async function deleteSelected() {
+    const n = sel.count;
+    if (!(await confirm(`Delete ${n} product${n === 1 ? '' : 's'}?`, "This can't be undone. Past orders keep their line items, but the products disappear from the store.", 'Delete'))) return;
+    setDeleting(true);
+    try {
+      const done = await bulkDelete('products', [...sel.ids]);
+      list.setRows((rows) => rows.filter((r) => !sel.ids.has(r.id)));
+      toast({ title: `Deleted ${done} product${done === 1 ? '' : 's'}`, tone: 'success' });
+      sel.clear();
+      list.reload();
+    } catch (e) {
+      toast({ title: errorMessage(e), tone: 'error' });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   async function saveStock() {
     if (!stockFor) return;
     const n = Number(stock);
@@ -72,7 +92,13 @@ function ProductsScreen() {
       <View style={{ gap: 10, paddingBottom: 10 }}>
         <View style={{ paddingHorizontal: 16, flexDirection: 'row', gap: 10, alignItems: 'center' }}>
           <View style={{ flex: 1 }}><SearchField value={text} onChangeText={setText} onSubmit={setQ} placeholder="Name, brand or SKU" /></View>
-          {can('products.create') && <Pressable onPress={() => router.push({ pathname: '/product/[id]', params: { id: 'new' } })} accessibilityLabel="Add product"
+          {isSuper && !sel.active && list.rows.length > 0 && (
+            <Pressable onPress={() => sel.start()} accessibilityLabel="Select products" hitSlop={6}
+              style={({ pressed }) => ({ height: 44, paddingHorizontal: 14, borderRadius: 22, borderWidth: 1, borderColor: colors.borderStrong, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.7 : 1 })}>
+              <Text variant="small" style={{ fontWeight: '700' }}>Select</Text>
+            </Pressable>
+          )}
+          {can('products.create') && !sel.active && <Pressable onPress={() => router.push({ pathname: '/product/[id]', params: { id: 'new' } })} accessibilityLabel="Add product"
             style={({ pressed }) => ({ width: 44, height: 44, borderRadius: 22, backgroundColor: colors.foreground, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.8 : 1 })}>
             <Feather name="plus" size={22} color={colors.background} />
           </Pressable>}
@@ -90,8 +116,10 @@ function ProductsScreen() {
           onEndReached={list.loadMore}
           onEndReachedThreshold={0.4}
           renderItem={({ item: p }) => (
-            <Row chevron={false} onPress={() => router.push({ pathname: '/product/[id]', params: { id: p.id } })}
-              left={<Thumb uri={p.image} size={48} />}
+            <Row chevron={false} selected={sel.active && sel.has(p.id)}
+              onPress={() => (sel.active ? sel.toggle(p.id) : router.push({ pathname: '/product/[id]', params: { id: p.id } }))}
+              onLongPress={isSuper && !sel.active ? () => sel.start(p.id) : undefined}
+              left={sel.active ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}><SelectCircle selected={sel.has(p.id)} /><Thumb uri={p.image} size={40} /></View> : <Thumb uri={p.image} size={48} />}
               title={p.name}
               subtitle={
                 <View style={{ gap: 4 }}>
@@ -109,7 +137,7 @@ function ProductsScreen() {
                 <View style={{ alignItems: 'flex-end', gap: 2 }}>
                   <Text variant="label" style={{ fontVariant: ['tabular-nums'] }}>{formatPrice(p.price)}</Text>
                   {p.compare_at_price ? <Text variant="small" tone="subtle" style={{ textDecorationLine: 'line-through' }}>{formatPrice(p.compare_at_price)}</Text> : null}
-                  <IconButton name="more-horizontal" label={`Actions for ${p.name}`} size={18} onPress={() => setMenu(p)} style={{ width: 32, height: 28 }} />
+                  {!sel.active && <IconButton name="more-horizontal" label={`Actions for ${p.name}`} size={18} onPress={() => setMenu(p)} style={{ width: 32, height: 28 }} />}
                 </View>
               } />
           )}
@@ -119,6 +147,10 @@ function ProductsScreen() {
             action={can('products.create') ? <Button title="Add product" icon="plus" onPress={() => router.push({ pathname: '/product/[id]', params: { id: 'new' } })} /> : undefined} />}
           ListFooterComponent={list.loadingMore ? <ActivityIndicator style={{ margin: 16 }} color={colors.muted} /> : null}
         />
+      )}
+      {sel.active && (
+        <SelectionBar count={sel.count} total={list.rows.length} allSelected={list.rows.length > 0 && list.rows.every((r) => sel.has(r.id))}
+          onSelectAll={() => sel.setAll(list.rows.map((r) => r.id))} onCancel={sel.clear} onDelete={deleteSelected} busy={deleting} />
       )}
 
       <Sheet visible={menu !== null} onClose={() => setMenu(null)} title={menu?.name ?? ''}>

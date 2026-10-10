@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { router, Stack } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, Divider, EmptyState, ErrorState, IconButton, Input, Sheet, Skeleton, Text } from '@/components/ui';
-import { Card, CardTitle, confirm, errorMessage, Pill, SelectField, SwitchRow } from '@/components/admin';
-import { couponState, deleteCoupon, listCoupons, listStaff, saveCoupon, type Coupon, type StaffMember } from '@/lib/admin';
+import { Card, CardTitle, confirm, errorMessage, Pill, SelectCircle, SelectField, SelectionBar, SwitchRow, useSelection } from '@/components/admin';
+import { bulkDelete, couponState, deleteCoupon, listCoupons, listStaff, saveCoupon, type Coupon, type StaffMember } from '@/lib/admin';
 import { useSession } from '@/providers/session';
 import { formatDate, formatPrice } from '@/lib/format';
 import { useAsync } from '@/lib/use-async';
@@ -14,6 +15,10 @@ export default function Discounts() {
   const { colors } = useTheme();
   const toast = useToast();
   const { can, isSuper, profile } = useSession();
+  const insets = useSafeAreaInsets();
+  // Bulk delete: super admins only (admin_bulk_delete() enforces this in the database too).
+  const sel = useSelection();
+  const [deleting, setDeleting] = useState(false);
   const manage = can('discounts.manage');
   const data = useAsync(async () => {
     const [coupons, staff] = await Promise.all([listCoupons(), isSuper ? listStaff() : Promise.resolve([] as StaffMember[])]);
@@ -30,6 +35,22 @@ export default function Discounts() {
   }
 
   const coupons = data.data?.coupons ?? [];
+
+  async function deleteSelected() {
+    const n = sel.count;
+    if (!(await confirm(`Delete ${n} discount code${n === 1 ? '' : 's'}?`, "Customers can no longer use them, and their sales drop out of the staff sales report. Past orders still show the code. This can't be undone.", 'Delete'))) return;
+    setDeleting(true);
+    try {
+      const done = await bulkDelete('coupons', [...sel.ids]);
+      toast({ title: `Deleted ${done} discount code${done === 1 ? '' : 's'}`, tone: 'success' });
+      sel.clear();
+      data.reload();
+    } catch (e) {
+      toast({ title: errorMessage(e), tone: 'error' });
+    } finally {
+      setDeleting(false);
+    }
+  }
   // Sales credited to each staff member through their codes.
   const byStaff = new Map<string, { name: string; orders: number; revenue: number; codes: number }>();
   for (const c of coupons) {
@@ -41,7 +62,12 @@ export default function Discounts() {
   const leaderboard = [...byStaff.values()].sort((a, b) => b.revenue - a.revenue);
   return (
     <>
-      <Stack.Screen options={{ headerRight: manage ? () => <IconButton name="plus" label="Create discount" onPress={() => setEditing('new')} /> : undefined }} />
+      <Stack.Screen options={{ headerRight: manage || isSuper ? () => (
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {isSuper && !sel.active && coupons.length > 0 && <Pressable onPress={() => sel.start()} hitSlop={8} style={{ paddingHorizontal: 10 }}><Text style={{ fontWeight: '700' }}>Select</Text></Pressable>}
+          {manage && !sel.active && <IconButton name="plus" label="Create discount" onPress={() => setEditing('new')} />}
+        </View>
+      ) : undefined }} />
       {data.error && !data.data ? <ErrorState onRetry={data.reload} message={data.error?.message} /> : (
         <ScrollView style={{ backgroundColor: colors.background }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 40 }}
           refreshControl={<RefreshControl refreshing={data.refreshing} onRefresh={data.reload} />}>
@@ -67,14 +93,17 @@ export default function Discounts() {
                 return (
                   <View key={c.id}>
                     {i > 0 && <Divider />}
-                    <Pressable onPress={() => (editable(c) ? setEditing(c) : router.push({ pathname: '/discount/[code]', params: { code: c.code } }))} style={({ pressed }) => ({ padding: 14, gap: 6, backgroundColor: pressed ? colors.surface2 : 'transparent' })}>
+                    <Pressable onPress={() => (sel.active ? sel.toggle(c.id) : editable(c) ? setEditing(c) : router.push({ pathname: '/discount/[code]', params: { code: c.code } }))}
+                      onLongPress={isSuper && !sel.active ? () => sel.start(c.id) : undefined} delayLongPress={350}
+                      style={({ pressed }) => ({ padding: 14, gap: 6, backgroundColor: pressed || (sel.active && sel.has(c.id)) ? colors.surface2 : 'transparent' })}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        {sel.active && <SelectCircle selected={sel.has(c.id)} />}
                         <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: colors.borderStrong }}>
                           <Text style={{ fontFamily: 'monospace', fontWeight: '700', letterSpacing: 0.5 }}>{c.code}</Text>
                         </View>
                         <Pill label={s.label} tone={s.tone} />
                         <View style={{ flex: 1 }} />
-                        {editable(c) && <IconButton name="trash-2" label={`Delete ${c.code}`} size={17} color={colors.sale} onPress={() => remove(c)} style={{ width: 32, height: 32 }} />}
+                        {editable(c) && !sel.active && <IconButton name="trash-2" label={`Delete ${c.code}`} size={17} color={colors.sale} onPress={() => remove(c)} style={{ width: 32, height: 32 }} />}
                       </View>
                       <Text variant="label">{c.type === 'percentage' ? `${c.value}% off` : `${formatPrice(c.value)} off`}{c.min_subtotal > 0 ? <Text tone="muted" variant="small">{`  ·  min. ${formatPrice(c.min_subtotal)}`}</Text> : null}</Text>
                       {c.description ? <Text variant="small" tone="muted">{c.description}</Text> : null}
@@ -94,6 +123,10 @@ export default function Discounts() {
           ) : <EmptyState icon="percent" title="No discount codes" description={manage ? 'Create a code customers can enter at checkout.' : 'No codes are assigned to you yet.'}
             action={manage ? <Button title="Create discount" icon="plus" onPress={() => setEditing('new')} /> : undefined} />}
         </ScrollView>
+      )}
+      {sel.active && (
+        <SelectionBar count={sel.count} total={coupons.length} allSelected={coupons.length > 0 && coupons.every((c) => sel.has(c.id))}
+          onSelectAll={() => sel.setAll(coupons.map((c) => c.id))} onCancel={sel.clear} onDelete={deleteSelected} busy={deleting} bottomInset={insets.bottom} />
       )}
       <Sheet visible={editing !== null} onClose={() => setEditing(null)} title={editing === 'new' ? 'Create discount' : 'Edit discount'}>
         {editing !== null ? <CouponForm key={editing === 'new' ? 'new' : editing.id} coupon={editing === 'new' ? null : editing} staff={data.data?.staff ?? []} onDone={() => { setEditing(null); data.reload(); }} /> : null}

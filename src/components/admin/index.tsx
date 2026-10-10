@@ -103,12 +103,13 @@ export function Thumb({ uri, size = 52 }: { uri?: string | null; size?: number }
 
 // ---- Lists ------------------------------------------------------------------------------------------------------
 
-export function Row({ left, title, subtitle, right, onPress, chevron = true }: {
-  left?: ReactNode; title: ReactNode; subtitle?: ReactNode; right?: ReactNode; onPress?: () => void; chevron?: boolean;
+export function Row({ left, title, subtitle, right, onPress, onLongPress, chevron = true, selected }: {
+  left?: ReactNode; title: ReactNode; subtitle?: ReactNode; right?: ReactNode; onPress?: () => void; onLongPress?: () => void; chevron?: boolean; selected?: boolean;
 }) {
   const { colors } = useTheme();
   return (
-    <Pressable onPress={onPress} disabled={!onPress} style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surface2 }]}>
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={350} disabled={!onPress && !onLongPress}
+      style={({ pressed }) => [styles.row, (pressed || selected) && { backgroundColor: colors.surface2 }]}>
       {left}
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
         {typeof title === 'string' ? <Text variant="label" numberOfLines={1}>{title}</Text> : title}
@@ -263,6 +264,54 @@ export function SelectSheetTrigger<T extends string>({ label, options, value, on
   );
 }
 
+// ---- Multi-select (super admins) ------------------------------------------------------------------------------
+
+/** Selection state for bulk actions: `active` turns on checkboxes; `toggle`/`setAll`/`clear` manage the set. */
+export function useSelection() {
+  const [active, setActive] = useState(false);
+  const [ids, setIds] = useState<Set<string>>(new Set());
+  return {
+    active,
+    ids,
+    count: ids.size,
+    has: (id: string) => ids.has(id),
+    start: (id?: string) => { setActive(true); setIds(id ? new Set([id]) : new Set()); },
+    toggle: (id: string) => setIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; }),
+    setAll: (all: string[]) => setIds((s) => (all.every((x) => s.has(x)) ? new Set() : new Set(all))),
+    clear: () => { setActive(false); setIds(new Set()); },
+  };
+}
+
+export function SelectCircle({ selected }: { selected: boolean }) {
+  const { colors } = useTheme();
+  return (
+    <View style={{ width: 24, height: 24, borderRadius: 12, borderWidth: 2, borderColor: selected ? colors.foreground : colors.borderStrong, backgroundColor: selected ? colors.foreground : 'transparent', alignItems: 'center', justifyContent: 'center' }}
+      accessibilityRole="checkbox" accessibilityState={{ checked: selected }}>
+      {selected ? <Feather name="check" size={14} color={colors.background} /> : null}
+    </View>
+  );
+}
+
+/** Bottom bar shown in selection mode: select all, cancel, and a destructive delete. */
+export function SelectionBar({ count, total, allSelected, onSelectAll, onCancel, onDelete, busy, bottomInset = 0 }: {
+  count: number; total: number; allSelected: boolean; onSelectAll: () => void; onCancel: () => void; onDelete: () => void; busy?: boolean; bottomInset?: number;
+}) {
+  const { colors } = useTheme();
+  return (
+    <View style={[styles.selBar, { backgroundColor: colors.background, borderTopColor: colors.border, paddingBottom: 12 + bottomInset }]}>
+      <Pressable onPress={onCancel} hitSlop={8} style={{ paddingHorizontal: 4 }}><Text style={{ fontWeight: '600' }}>Cancel</Text></Pressable>
+      <Pressable onPress={onSelectAll} hitSlop={8} disabled={!total} style={{ flex: 1, alignItems: 'center' }}>
+        <Text variant="small" tone="muted">{count} selected · <Text variant="small" style={{ fontWeight: '700' }}>{allSelected ? 'Deselect all' : 'Select all'}</Text></Text>
+      </Pressable>
+      <Pressable onPress={onDelete} disabled={!count || busy} accessibilityLabel={`Delete ${count} selected`}
+        style={({ pressed }) => [styles.selDelete, { backgroundColor: colors.sale, opacity: !count || busy ? 0.45 : pressed ? 0.85 : 1 }]}>
+        <Feather name="trash-2" size={15} color="#fff" />
+        <Text style={{ color: '#fff', fontWeight: '700' }}>{busy ? 'Deleting…' : `Delete${count ? ` ${count}` : ''}`}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   card: { borderWidth: 1, borderRadius: radius.lg },
   pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.full, alignSelf: 'flex-start' },
@@ -270,4 +319,6 @@ const styles = StyleSheet.create({
   search: { flexDirection: 'row', alignItems: 'center', gap: 10, height: 44, paddingHorizontal: 14, borderRadius: radius.full },
   select: { height: 50, borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
   option: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 14, borderRadius: radius.md },
+  selBar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  selDelete: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, height: 40, borderRadius: radius.full },
 });

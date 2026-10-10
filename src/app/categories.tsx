@@ -3,10 +3,11 @@ import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, V
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { Button, Divider, EmptyState, ErrorState, IconButton, Input, Sheet, Skeleton, Text } from '@/components/ui';
-import { Card, confirm, errorMessage, NoAccess } from '@/components/admin';
-import { deleteCategory, listCategories, reorderCategories, saveCategory, slugify, uploadImage } from '@/lib/admin';
+import { Card, confirm, errorMessage, NoAccess, SelectCircle, SelectionBar, useSelection } from '@/components/admin';
+import { bulkDelete, deleteCategory, listCategories, reorderCategories, saveCategory, slugify, uploadImage } from '@/lib/admin';
 import type { Category } from '@/lib/types';
 import { useAsync } from '@/lib/use-async';
 import { useToast } from '@/providers/toast';
@@ -21,6 +22,10 @@ export default function Categories() {
 function CategoriesScreen() {
   const { colors } = useTheme();
   const toast = useToast();
+  const { isSuper } = useSession();
+  const insets = useSafeAreaInsets();
+  const sel = useSelection();
+  const [deleting, setDeleting] = useState(false);
   const data = useAsync(listCategories, []);
   // Local order for instant feedback while the reorder saves.
   const [order, setOrder] = useState<{ source?: Category[]; list: Category[] }>({ list: [] });
@@ -47,9 +52,31 @@ function CategoriesScreen() {
     catch (e) { toast({ title: errorMessage(e), tone: 'error' }); }
   }
 
+  async function deleteSelected() {
+    const n = sel.count;
+    const products = list.filter((c) => sel.has(c.id)).reduce((t, c) => t + (c.product_count ?? 0), 0);
+    if (!(await confirm(`Delete ${n} categor${n === 1 ? 'y' : 'ies'}?`, `Their ${products} product${products === 1 ? '' : 's'} stay in the store but become uncategorised. This can't be undone.`, 'Delete'))) return;
+    setDeleting(true);
+    try {
+      const done = await bulkDelete('categories', [...sel.ids]);
+      toast({ title: `Deleted ${done} categor${done === 1 ? 'y' : 'ies'}`, tone: 'success' });
+      sel.clear();
+      data.reload();
+    } catch (e) {
+      toast({ title: errorMessage(e), tone: 'error' });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <>
-      <Stack.Screen options={{ headerRight: () => <IconButton name="plus" label="Add category" onPress={() => setEditing('new')} /> }} />
+      <Stack.Screen options={{ headerRight: () => (
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {isSuper && !sel.active && list.length > 0 && <Pressable onPress={() => sel.start()} hitSlop={8} style={{ paddingHorizontal: 10 }}><Text style={{ fontWeight: '700' }}>Select</Text></Pressable>}
+          {!sel.active && <IconButton name="plus" label="Add category" onPress={() => setEditing('new')} />}
+        </View>
+      ) }} />
       {data.error && !data.data ? <ErrorState onRetry={data.reload} message={data.error?.message} /> : (
         <ScrollView style={{ backgroundColor: colors.background }} contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 40 }}
           refreshControl={<RefreshControl refreshing={data.refreshing} onRefresh={data.reload} />}>
@@ -59,25 +86,31 @@ function CategoriesScreen() {
               {list.map((c, i) => (
                 <View key={c.id}>
                   {i > 0 && <Divider />}
-                  <View style={styles.row}>
+                  <Pressable style={styles.row} disabled={!sel.active} onPress={() => sel.toggle(c.id)}>
+                    {sel.active ? <View style={{ paddingHorizontal: 6 }}><SelectCircle selected={sel.has(c.id)} /></View> : (
                     <View style={{ gap: 2 }}>
                       <IconButton name="chevron-up" label={`Move ${c.name} up`} size={18} onPress={() => move(i, -1)} style={{ width: 30, height: 26, opacity: i === 0 || busy ? 0.3 : 1 }} />
                       <IconButton name="chevron-down" label={`Move ${c.name} down`} size={18} onPress={() => move(i, 1)} style={{ width: 30, height: 26, opacity: i === list.length - 1 || busy ? 0.3 : 1 }} />
                     </View>
+                    )}
                     <View style={[styles.thumb, { backgroundColor: colors.surface2 }]}>{c.image_url ? <Image source={c.image_url} style={StyleSheet.absoluteFill} contentFit="cover" /> : null}</View>
-                    <Pressable onPress={() => setEditing(c)} style={{ flex: 1, minWidth: 0 }}>
+                    <Pressable onPress={() => (sel.active ? sel.toggle(c.id) : setEditing(c))} onLongPress={isSuper && !sel.active ? () => sel.start(c.id) : undefined} style={{ flex: 1, minWidth: 0 }}>
                       <Text variant="label" numberOfLines={1}>{c.name}</Text>
                       <Text variant="small" tone="muted" numberOfLines={1}>/{c.slug} · {c.product_count ?? 0} products</Text>
                     </Pressable>
-                    <IconButton name="edit-2" label={`Edit ${c.name}`} size={17} onPress={() => setEditing(c)} />
-                    <IconButton name="trash-2" label={`Delete ${c.name}`} size={17} color={colors.sale} onPress={() => remove(c)} />
-                  </View>
+                    {!sel.active && <IconButton name="edit-2" label={`Edit ${c.name}`} size={17} onPress={() => setEditing(c)} />}
+                    {!sel.active && <IconButton name="trash-2" label={`Delete ${c.name}`} size={17} color={colors.sale} onPress={() => remove(c)} />}
+                  </Pressable>
                 </View>
               ))}
               {!list.length && <EmptyState icon="folder" title="No categories" action={<Button title="Add category" icon="plus" onPress={() => setEditing('new')} />} />}
             </Card>
           )}
         </ScrollView>
+      )}
+      {sel.active && (
+        <SelectionBar count={sel.count} total={list.length} allSelected={list.length > 0 && list.every((c) => sel.has(c.id))}
+          onSelectAll={() => sel.setAll(list.map((c) => c.id))} onCancel={sel.clear} onDelete={deleteSelected} busy={deleting} bottomInset={insets.bottom} />
       )}
       <Sheet visible={editing !== null} onClose={() => setEditing(null)} title={editing === 'new' ? 'New category' : 'Edit category'}>
         {editing !== null ? <CategoryForm key={editing === 'new' ? 'new' : editing.id} category={editing === 'new' ? null : editing} onDone={() => { setEditing(null); data.reload(); }} /> : null}
