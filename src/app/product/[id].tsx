@@ -13,7 +13,8 @@ import {
 } from '@/lib/admin';
 import { DELIVERY_LABEL, DELIVERY_METHODS, SITE } from '@/lib/constants';
 import { formatRelative } from '@/lib/format';
-import { combinations, optionGroups, validOptionText } from '@/lib/variant-options';
+import { fitsMatrix, fromVariants, matrixError, toVariants, type Matrix } from '@/lib/variant-matrix';
+import { VariantMatrixEditor } from '@/components/admin/variant-matrix-editor';
 import type { Category, DeliveryMethod, Product, ProductQuestion } from '@/lib/types';
 import { useAsync } from '@/lib/use-async';
 import { useToast } from '@/providers/toast';
@@ -73,11 +74,10 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
   const [methods, setMethods] = useState<DeliveryMethod[]>(product?.shipping_methods ?? ['standard', 'express', 'sea']);
   const [images, setImages] = useState<Img[]>(product?.images.map((i) => ({ image_url: i.image_url, alt_text: i.alt_text })) ?? []);
   const [variants, setVariants] = useState<Variant[]>(product?.variants.map((v) => ({ id: v.id, name: v.name, value: v.value, additional_price: String(v.additional_price), stock_quantity: String(v.stock_quantity), image_url: v.image_url ?? null })) ?? []);
-  // Option builder: e.g. Color = "Red, Blue" and Size = "S, M, L" → one variant per combination.
-  const [optionDefs, setOptionDefs] = useState<{ name: string; values: string }[]>(() => {
-    const g = optionGroups(product?.variants ?? []);
-    return g.length ? g.map((x) => ({ name: x.name, values: x.values.join(', ') })) : [{ name: 'Color', values: '' }, { name: 'Size', values: '' }];
-  });
+  // Colours × sizes editor. Products set up with more than two options keep the plain variant list.
+  const [matrixMode] = useState(() => fitsMatrix(product?.variants ?? []));
+  const [matrix, setMatrix] = useState<Matrix>(() => fromVariants(product?.variants ?? []));
+  const activeVariants: Variant[] = matrixMode ? toVariants(matrix) : variants;
   const [urlInput, setUrlInput] = useState('');
   const [uploading, setUploading] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -86,7 +86,7 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
 
   const cbm = (Number(dims.l) * Number(dims.w) * Number(dims.h)) / 1_000_000 || 0;
   const discount = Number(compareAt) > Number(price) && Number(price) > 0 ? Math.floor(((Number(compareAt) - Number(price)) / Number(compareAt)) * 100) : 0;
-  const variantStock = variants.reduce((n, v) => n + (Number(v.stock_quantity) || 0), 0);
+  const variantStock = activeVariants.reduce((n, v) => n + (Number(v.stock_quantity) || 0), 0);
 
   // ---- Images
   async function addFrom(source: 'library' | 'camera') {
@@ -130,29 +130,11 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
     return next;
   }
 
-  // ---- Variants from options
-  async function generateVariants() {
-    const groups = optionDefs.map((d) => ({ name: d.name.trim(), values: d.values.split(',').map((v) => v.trim()).filter(Boolean) })).filter((g) => g.name && g.values.length);
-    if (!groups.length) return toast({ title: 'Add at least one option with values, e.g. Color: Red, Blue', tone: 'error' });
-    const bad = groups.flatMap((g) => [g.name, ...g.values]).find((x) => !validOptionText(x));
-    if (bad) return toast({ title: `“${bad}” can't contain “/”`, tone: 'error' });
-    if (new Set(groups.map((g) => g.name.toLowerCase())).size !== groups.length) return toast({ title: 'Each option needs a different name', tone: 'error' });
-    const combos = combinations(groups);
-    if (combos.length > 50) return toast({ title: `That makes ${combos.length} combinations; the limit is 50`, tone: 'error' });
-    // Keep stock, price and photo of combinations that already exist.
-    const byValue = new Map(variants.map((v) => [v.value.trim(), v]));
-    const removed = variants.filter((v) => !combos.some((c) => c.value === v.value.trim()));
-    if (removed.length && !(await confirm('Replace variants?', `This removes ${removed.length} existing variant${removed.length === 1 ? '' : 's'}: ${removed.map((v) => v.value).join(', ')}.`, 'Continue', false))) return;
-    setVariants(combos.map((c) => {
-      const old = byValue.get(c.value);
-      return old ? { ...old, name: c.name } : { name: c.name, value: c.value, additional_price: '0', stock_quantity: '0', image_url: null };
-    }));
-    toast({ title: `${combos.length} combination${combos.length === 1 ? '' : 's'} ready. Set stock for each; delete any that don't exist.`, tone: 'success' });
-  }
-
   // ---- Save / delete
   async function save() {
     setError(null);
+    const matrixProblem = matrixMode ? matrixError(matrix) : null;
+    if (matrixProblem) { setError(matrixProblem); toast({ title: matrixProblem, tone: 'error' }); return; }
     const specifications = Object.fromEntries(
       specs.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
         const idx = l.indexOf(':');
@@ -168,7 +150,7 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
       sku: sku || null, stock_quantity: Number(stock) || 0, is_featured: featured, is_active: active,
       weight_kg: Number(weight), length_cm: Number(dims.l), width_cm: Number(dims.w), height_cm: Number(dims.h), shipping_methods: methods,
       images,
-      variants: variants.filter((v) => v.name.trim() || v.value.trim()).map((v) => ({ ...v, additional_price: Number(v.additional_price) || 0, stock_quantity: Number(v.stock_quantity) || 0, image_url: v.image_url && images.some((img) => img.image_url === v.image_url) ? v.image_url : null })),
+      variants: activeVariants.filter((v) => v.name.trim() || v.value.trim()).map((v) => ({ ...v, additional_price: Number(v.additional_price) || 0, stock_quantity: Number(v.stock_quantity) || 0, image_url: v.image_url && images.some((img) => img.image_url === v.image_url) ? v.image_url : null })),
     };
     setSaving(true);
     try {
@@ -293,29 +275,25 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
             <CardTitle title="Inventory" icon="layers" />
             <View style={{ flexDirection: 'row', gap: 10 }}>
               <Input label="SKU" value={sku} onChangeText={setSku} autoCapitalize="characters" placeholder="Optional" containerStyle={{ flex: 1 }} />
-              <Input label="Stock" value={variants.length ? String(variantStock) : stock} editable={variants.length === 0} onChangeText={(t) => setStock(t.replace(/\D/g, ''))}
-                keyboardType="number-pad" containerStyle={{ flex: 1 }} style={variants.length ? { opacity: 0.55 } : undefined} />
+              <Input label="Stock" value={activeVariants.length ? String(variantStock) : stock} editable={activeVariants.length === 0} onChangeText={(t) => setStock(t.replace(/\D/g, ''))}
+                keyboardType="number-pad" containerStyle={{ flex: 1 }} style={activeVariants.length ? { opacity: 0.55 } : undefined} />
             </View>
-            {variants.length > 0 && <Text variant="small" tone="muted">Calculated from variant stock.</Text>}
+            {activeVariants.length > 0 && <Text variant="small" tone="muted">Calculated from colour and size stock.</Text>}
           </Card>
 
-          {/* Variants */}
+          {/* Colours & sizes */}
+          {matrixMode ? (
+            <Card style={{ gap: 12 }}>
+              <CardTitle title="Colours & sizes" icon="grid" />
+              <Text variant="small" tone="muted">Give each colour its photo and each size its price, then enter stock for the combinations you sell. The first photo stays the cover.</Text>
+              <VariantMatrixEditor matrix={matrix} onChange={setMatrix} images={images} />
+            </Card>
+          ) : (
+            <>
+          
           <Card style={{ gap: 12 }}>
-            <CardTitle title="Options & variants" icon="grid" right={<Button size="sm" variant="ghost" icon="plus" title="One" onPress={() => setVariants([...variants, { name: variants[0]?.name ?? 'Size', value: '', additional_price: '0', stock_quantity: '0', image_url: null }])} />} />
-            <Text variant="small" tone="muted">Add options such as Color and Size, then create the combinations. Each combination has its own stock, extra price and photo; delete combinations that don&apos;t exist, or set their stock to 0 to show them as sold out. The first image stays the cover.</Text>
-            <View style={{ gap: 8, padding: 10, borderRadius: radius.md, backgroundColor: colors.surface2 }}>
-              {optionDefs.map((d, i) => (
-                <View key={i} style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-                  <Input value={d.name} onChangeText={(t) => setOptionDefs(optionDefs.map((x, j) => (j === i ? { ...x, name: t } : x)))} placeholder="Option" containerStyle={{ width: 96 }} style={styles.compact} accessibilityLabel={`Option ${i + 1} name`} />
-                  <Input value={d.values} onChangeText={(t) => setOptionDefs(optionDefs.map((x, j) => (j === i ? { ...x, values: t } : x)))} placeholder="Red, Blue, Black" containerStyle={{ flex: 1 }} style={styles.compact} accessibilityLabel={`Option ${i + 1} values`} />
-                  <SmallBtn icon="x" label={`Remove option ${i + 1}`} danger onPress={() => setOptionDefs(optionDefs.filter((_, j) => j !== i))} />
-                </View>
-              ))}
-              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-                {optionDefs.length < 3 && <Button size="sm" variant="ghost" icon="plus" title="Add option" onPress={() => setOptionDefs([...optionDefs, { name: '', values: '' }])} />}
-                <Button size="sm" variant="secondary" icon="layers" title="Create combinations" onPress={generateVariants} />
-              </View>
-            </View>
+            <CardTitle title="Variants" icon="grid" right={<Button size="sm" variant="ghost" icon="plus" title="One" onPress={() => setVariants([...variants, { name: variants[0]?.name ?? 'Size', value: '', additional_price: '0', stock_quantity: '0', image_url: null }])} />} />
+            <Text variant="small" tone="muted">This product uses more than two options, so its variants are listed one by one.</Text>
             {variants.length ? variants.map((v, i) => (
               <View key={v.id ?? `new-${i}`} style={[styles.variant, { backgroundColor: colors.surface2 }]}>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -352,6 +330,9 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
               </View>
             )}
           </Card>
+
+            </>
+          )}
 
           {/* Shipping */}
           <Card style={{ gap: 12 }}>

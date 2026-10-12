@@ -108,3 +108,9 @@ export function photoOption(variants: VariantLike[]): string | null {
 export function photoForValue(variants: VariantLike[], name: string, value: string): string | null {
   return variants.find((v) => v.image_url && optionValue(v, name) === value)?.image_url ?? null;
 }
+
+/** Extra price shared by every variant with this value (e.g. size XL is +2,000 in every colour), else null. */
+export function valueExtra(variants: (VariantLike & { additional_price: number })[], name: string, value: string): number | null {
+  const prices = new Set(variants.filter((v) => optionValue(v, name) === value).map((v) => Number(v.additional_price) || 0));
+  return prices.size === 1 ? [...prices][0] : null;
+}
