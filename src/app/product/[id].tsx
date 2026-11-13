@@ -1,26 +1,32 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
-import { Button, EmptyState, ErrorState, IconButton, Input, Skeleton, Text } from '@/components/ui';
+import { Button, Chip, EmptyState, ErrorState, IconButton, Input, Skeleton, Text } from '@/components/ui';
 import { Card, CardTitle, confirm, errorMessage, NoAccess, SelectField, SwitchRow } from '@/components/admin';
 import { useSession } from '@/providers/session';
 import {
-  answerQuestion, deleteProduct, getProduct, getProductQuestions, listCategories, saveProduct, slugify, uploadImage, type ProductPayload,
+  answerQuestion, deleteProduct, getProduct, getProductQuestions, listCategories, saveProduct, slugify, uploadImage, type ProductPayload, groupDealsAvailable,
 } from '@/lib/admin';
 import { DELIVERY_LABEL, DELIVERY_METHODS, SITE } from '@/lib/constants';
 import { formatRelative } from '@/lib/format';
 import { fitsMatrix, fromVariants, matrixError, toVariants, type Matrix } from '@/lib/variant-matrix';
 import { VariantMatrixEditor } from '@/components/admin/variant-matrix-editor';
-import type { Category, DeliveryMethod, Product, ProductQuestion } from '@/lib/types';
+import type { Category, DeliveryMethod, Product, ProductQuestion, SaleMode } from '@/lib/types';
 import { useAsync } from '@/lib/use-async';
 import { useToast } from '@/providers/toast';
 import { radius, useTheme } from '@/theme';
 
 type Img = { image_url: string; alt_text: string };
+const SALE_MODES: { value: SaleMode; label: string; hint: string }[] = [
+  { value: 'retail', label: 'Retail', hint: 'Personal' },
+  { value: 'both', label: 'Both', hint: 'Everyone' },
+  { value: 'wholesale', label: 'Wholesale', hint: 'Business, bulk' },
+];
+
 type Variant = { id?: string; name: string; value: string; additional_price: string; stock_quantity: string; image_url: string | null };
 
 export default function ProductScreen() {
@@ -65,6 +71,17 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
   const [specs, setSpecs] = useState(Object.entries(product?.specifications ?? {}).map(([k, v]) => `${k}: ${v}`).join('\n'));
   const [price, setPrice] = useState(product ? String(product.price) : '');
   const [compareAt, setCompareAt] = useState(product?.compare_at_price != null ? String(product.compare_at_price) : '');
+  // Group deal: shown once we know the database supports it (0013_engagement.sql).
+  const [groupOn, setGroupOn] = useState(Boolean(product && 'group_size' in product));
+  const [groupPrice, setGroupPrice] = useState(product?.group_price != null ? String(product.group_price) : '');
+  const [groupSize, setGroupSize] = useState(product?.group_size ?? 2);
+  // Personal accounts buy retail; business accounts only see wholesale products (0015).
+  const [saleMode, setSaleMode] = useState<SaleMode>(product?.sale_mode ?? 'retail');
+  const [wholesalePrice, setWholesalePrice] = useState(product?.wholesale_price != null ? String(product.wholesale_price) : '');
+  const [minQty, setMinQty] = useState(String(product?.wholesale_min_qty ?? 10));
+  const sellsRetail = saleMode !== 'wholesale';
+  const sellsWholesale = saleMode !== 'retail';
+  useEffect(() => { if (!product) groupDealsAvailable().then(setGroupOn).catch(() => {}); }, [product]);
   const [sku, setSku] = useState(product?.sku ?? '');
   const [stock, setStock] = useState(product ? String(product.stock_quantity) : '0');
   const [featured, setFeatured] = useState(product?.is_featured ?? false);
@@ -146,9 +163,11 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
       name, slug: slug || slugify(name), brand, category_id: categoryId || null, description,
       details: details.split('\n').map((d) => d.trim()).filter(Boolean),
       specifications,
-      price: Number(price || NaN), compare_at_price: compareAt.trim() ? Number(compareAt) : null,
+      price: sellsRetail ? Number(price || NaN) : Number(wholesalePrice || NaN), compare_at_price: sellsRetail && compareAt.trim() ? Number(compareAt) : null,
+      sale_mode: saleMode, wholesale_price: sellsWholesale && wholesalePrice.trim() ? Number(wholesalePrice) : null, wholesale_min_qty: Number(minQty) || 1,
       sku: sku || null, stock_quantity: Number(stock) || 0, is_featured: featured, is_active: active,
       weight_kg: Number(weight), length_cm: Number(dims.l), width_cm: Number(dims.w), height_cm: Number(dims.h), shipping_methods: methods,
+      ...(groupOn ? { group_price: sellsRetail && groupPrice.trim() ? Number(groupPrice) : null, group_size: groupSize } : {}),
       images,
       variants: activeVariants.filter((v) => v.name.trim() || v.value.trim()).map((v) => ({ ...v, additional_price: Number(v.additional_price) || 0, stock_quantity: Number(v.stock_quantity) || 0, image_url: v.image_url && images.some((img) => img.image_url === v.image_url) ? v.image_url : null })),
     };
@@ -261,14 +280,67 @@ function ProductForm({ product, categories, questions, onSaved, canEdit, canDele
           {/* Pricing */}
           <Card style={{ gap: 12 }}>
             <CardTitle title="Pricing (TSh)" icon="tag" />
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <Input label="Price" value={price} onChangeText={setPrice} {...numberProps} placeholder="0" containerStyle={{ flex: 1 }} />
-              <Input label="Compare at" value={compareAt} onChangeText={setCompareAt} {...numberProps} placeholder="Optional" containerStyle={{ flex: 1 }} />
+            <Text variant="small" tone="muted">Personal accounts buy retail. Business accounts only see wholesale products.</Text>
+            <View style={{ flexDirection: 'row', gap: 4, padding: 4, borderRadius: radius.md, backgroundColor: colors.surface2 }} accessibilityRole="radiogroup">
+              {SALE_MODES.map((m) => {
+                const on = saleMode === m.value;
+                return (
+                  <Pressable key={m.value} onPress={() => setSaleMode(m.value)} accessibilityRole="radio" accessibilityState={{ selected: on }}
+                    style={{ flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: radius.sm, backgroundColor: on ? colors.surface : 'transparent' }}>
+                    <Text variant="label" tone={on ? 'default' : 'muted'}>{m.label}</Text>
+                    <Text variant="small" tone="muted" style={{ fontSize: 11 }}>{m.hint}</Text>
+                  </Pressable>
+                );
+              })}
             </View>
-            <Text variant="small" tone={discount > 0 ? 'sale' : 'muted'} style={discount > 0 ? { fontWeight: '700' } : undefined}>
-              {discount > 0 ? `Shows as ${discount}% off` : 'Set a higher compare-at price to show a discount.'}
-            </Text>
+            {sellsRetail && (
+              <>
+                <Text variant="small" tone="muted" style={{ textTransform: 'uppercase', letterSpacing: 1 }}>Retail</Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <Input label="Price" value={price} onChangeText={setPrice} {...numberProps} placeholder="0" containerStyle={{ flex: 1 }} />
+                  <Input label="Compare at" value={compareAt} onChangeText={setCompareAt} {...numberProps} placeholder="Optional" containerStyle={{ flex: 1 }} />
+                </View>
+                <Text variant="small" tone={discount > 0 ? 'sale' : 'muted'} style={discount > 0 ? { fontWeight: '700' } : undefined}>
+                  {discount > 0 ? `Shows as ${discount}% off` : 'Set a higher compare-at price to show a discount.'}
+                </Text>
+              </>
+            )}
+            {sellsWholesale && (
+              <>
+                <Text variant="small" tone="muted" style={{ textTransform: 'uppercase', letterSpacing: 1, marginTop: sellsRetail ? 6 : 0 }}>Wholesale</Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <Input label="Price per unit" value={wholesalePrice} onChangeText={(t) => setWholesalePrice(t.replace(/[^\d.]/g, ''))} {...numberProps} placeholder="0" containerStyle={{ flex: 1 }} />
+                  <Input label="Minimum order" value={minQty} onChangeText={(t) => setMinQty(t.replace(/\D/g, ''))} keyboardType="number-pad" inputMode="numeric" placeholder="10" containerStyle={{ flex: 1 }} />
+                </View>
+                <Text variant="small" tone={saleMode === 'both' && Number(wholesalePrice) > 0 && Number(wholesalePrice) >= Number(price) ? 'sale' : 'muted'}>
+                  {saleMode === 'both' && Number(wholesalePrice) > 0 && Number(price) > 0
+                    ? Number(wholesalePrice) < Number(price)
+                      ? `Businesses save ${Math.floor((1 - Number(wholesalePrice) / Number(price)) * 100)}% per unit and order at least ${Number(minQty) || 1} units (TSh ${(Number(wholesalePrice) * (Number(minQty) || 1)).toLocaleString()} minimum).`
+                      : 'The wholesale price must be lower than the retail price.'
+                    : `Business accounts order at least ${Number(minQty) || 1} units.`}
+                </Text>
+              </>
+            )}
           </Card>
+
+          {groupOn && sellsRetail && (
+            <Card style={{ gap: 12 }}>
+              <CardTitle title="Group deal" icon="users" />
+              <Text variant="small" tone="muted">Shoppers start a group and share the link. When enough people join in time, each can buy at the group price.</Text>
+              <Input label="Group price (TSh)" value={groupPrice} onChangeText={(t) => setGroupPrice(t.replace(/[^\d.]/g, ''))} {...numberProps} placeholder="No group deal" />
+              <Text variant="label">People needed</Text>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                {[2, 3, 4, 5].map((n) => <Chip key={n} label={`${n}`} selected={groupSize === n} disabled={!groupPrice.trim()} onPress={() => setGroupSize(n)} />)}
+              </View>
+              {groupPrice.trim() && Number(price) > 0 ? (
+                <Text variant="small" tone={Number(groupPrice) < Number(price) ? 'muted' : 'sale'}>
+                  {Number(groupPrice) < Number(price)
+                    ? `Each member saves TSh ${(Number(price) - Number(groupPrice)).toLocaleString()} (${Math.floor((1 - Number(groupPrice) / Number(price)) * 100)}%).`
+                    : 'The group price must be lower than the price.'}
+                </Text>
+              ) : null}
+            </Card>
+          )}
 
           {/* Inventory */}
           <Card style={{ gap: 12 }}>

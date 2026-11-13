@@ -45,10 +45,11 @@ function CustomersScreen() {
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <Text variant="label" numberOfLines={1} style={{ flexShrink: 1 }}>{c.full_name ?? '—'}</Text>
                   {c.role !== 'customer' && <Pill label={ROLE_LABEL[c.role as StaffRole] ?? c.role} tone="dark" />}
+                  {c.account_type === 'business' && <Pill label="Business" tone="info" />}
                   {c.status === 'suspended' && <Pill label="Suspended" tone="sale" />}
                 </View>
               }
-              subtitle={`${c.email ?? ''} · joined ${formatDate(c.created_at)}`}
+              subtitle={`${c.business_name ? `${c.business_name} · ` : ''}${c.email ?? ''} · joined ${formatDate(c.created_at)}`}
               right={
                 <View style={{ alignItems: 'flex-end' }}>
                   <Text variant="label" style={{ fontVariant: ['tabular-nums'] }}>{formatPrice(c.spent)}</Text>

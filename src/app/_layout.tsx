@@ -31,6 +31,7 @@ function Navigator() {
           <Stack.Screen name="shipping" options={{ title: 'Shipping rates' }} />
           <Stack.Screen name="questions" options={{ title: 'Customer questions' }} />
           <Stack.Screen name="staff" options={{ title: 'Staff' }} />
+          <Stack.Screen name="ai-import" options={{ title: 'AI import' }} />
           <Stack.Screen name="discount/[code]" options={{ title: 'Discount' }} />
         </Stack.Protected>
         <Stack.Protected guard={!isAdmin}>

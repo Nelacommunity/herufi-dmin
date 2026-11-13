@@ -94,8 +94,14 @@ function ProductsScreen() {
           <View style={{ flex: 1 }}><SearchField value={text} onChangeText={setText} onSubmit={setQ} placeholder="Name, brand or SKU" /></View>
           {isSuper && !sel.active && list.rows.length > 0 && (
             <Pressable onPress={() => sel.start()} accessibilityLabel="Select products" hitSlop={6}
-              style={({ pressed }) => ({ height: 44, paddingHorizontal: 14, borderRadius: 22, borderWidth: 1, borderColor: colors.borderStrong, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.7 : 1 })}>
-              <Text variant="small" style={{ fontWeight: '700' }}>Select</Text>
+              style={({ pressed }) => ({ width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: colors.borderStrong, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.7 : 1 })}>
+              <Feather name="check-square" size={18} color={colors.foreground} />
+            </Pressable>
+          )}
+          {can('products.create') && !sel.active && (
+            <Pressable onPress={() => router.push('/ai-import')} accessibilityLabel="AI import from screenshots" hitSlop={6}
+              style={({ pressed }) => ({ width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: colors.borderStrong, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.7 : 1 })}>
+              <Feather name="zap" size={18} color={colors.foreground} />
             </Pressable>
           )}
           {can('products.create') && !sel.active && <Pressable onPress={() => router.push({ pathname: '/product/[id]', params: { id: 'new' } })} accessibilityLabel="Add product"
@@ -127,6 +133,7 @@ function ProductsScreen() {
                   <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                     <Pill label={p.is_active ? 'Active' : 'Draft'} tone={p.is_active ? 'success' : 'muted'} />
                     {p.is_featured && <Pill label="Featured" />}
+                    {p.sale_mode !== 'retail' && <Pill label={p.sale_mode === 'both' ? 'Retail + wholesale' : 'Wholesale'} tone="info" />}
                     <Text variant="small" style={{ color: p.stock_quantity === 0 ? colors.sale : p.stock_quantity < LOW_STOCK ? colors.warning : colors.muted, fontWeight: p.stock_quantity < LOW_STOCK ? '700' : '400' }}>
                       {p.stock_quantity === 0 ? 'Out of stock' : `${p.stock_quantity} in stock`}{p.variant_count ? ` · ${p.variant_count} variants` : ''}
                     </Text>
@@ -135,8 +142,9 @@ function ProductsScreen() {
               }
               right={
                 <View style={{ alignItems: 'flex-end', gap: 2 }}>
-                  <Text variant="label" style={{ fontVariant: ['tabular-nums'] }}>{formatPrice(p.price)}</Text>
-                  {p.compare_at_price ? <Text variant="small" tone="subtle" style={{ textDecorationLine: 'line-through' }}>{formatPrice(p.compare_at_price)}</Text> : null}
+                  <Text variant="label" style={{ fontVariant: ['tabular-nums'] }}>{formatPrice(p.sale_mode === 'wholesale' && p.wholesale_price != null ? p.wholesale_price : p.price)}</Text>
+                  {p.compare_at_price && p.sale_mode !== 'wholesale' ? <Text variant="small" tone="subtle" style={{ textDecorationLine: 'line-through' }}>{formatPrice(p.compare_at_price)}</Text> : null}
+                  {p.sale_mode !== 'retail' && p.wholesale_price != null ? <Text variant="small" tone="muted" style={{ fontVariant: ['tabular-nums'] }}>{p.sale_mode === 'both' ? `${formatPrice(p.wholesale_price)} ws · ` : ''}min {p.wholesale_min_qty}</Text> : null}
                   {!sel.active && <IconButton name="more-horizontal" label={`Actions for ${p.name}`} size={18} onPress={() => setMenu(p)} style={{ width: 32, height: 28 }} />}
                 </View>
               } />

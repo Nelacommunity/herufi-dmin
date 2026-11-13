@@ -7,7 +7,7 @@ export const SITE = {
 
 export const ORDER_STATUSES: OrderStatus[] = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'];
 export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
-  pending: 'Pending', confirmed: 'Confirmed', processing: 'Processing', shipped: 'Shipped', delivered: 'Delivered', cancelled: 'Cancelled',
+  pending: 'Pending', confirmed: 'Confirmed', processing: 'Packed', shipped: 'In transit', delivered: 'Delivered', cancelled: 'Cancelled',
 };
 export const DELIVERY_METHODS: DeliveryMethod[] = ['standard', 'express', 'sea'];
 export const DELIVERY_LABEL: Record<DeliveryMethod, string> = { standard: 'Air cargo', express: 'Express air', sea: 'Sea freight' };

@@ -5,9 +5,12 @@
  * checked by Row Level Security (`public.is_admin()`, which requires role = 'admin' AND status = 'active'),
  * plus column-level grants. A non-admin who somehow reached these screens would get permission errors.
  */
+import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
+import { consistentOptions } from '@/lib/variant-options';
 import { LOW_STOCK, ORDERS_PER_PAGE, ORDER_STATUSES, PRODUCTS_PER_PAGE, SITE } from '@/lib/constants';
-import type { Category, DeliveryMethod, Order, OrderStatus, Product, ProductQuestion, Profile, ShippingRate } from '@/lib/types';
+import type { Category, DeliveryMethod, Order, OrderStatus, Product, ProductQuestion, Profile, SaleMode, ShippingRate } from '@/lib/types';
+import { SHIP_DAYS, currentBatchDate, upcomingBatchDate } from '@/lib/ship-batch';
 import type { Permission, StaffRole } from '@/lib/permissions';
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -44,6 +47,17 @@ export async function refreshStore() {
     await fetch(`${SITE.url}/api/admin/revalidate`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
   } catch {
     /* the store's cache expires on its own */
+  }
+}
+
+/** Ask the website to push any alerts this change queued (price drops, restocks). Best effort. */
+export async function flushPushes() {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (token) await fetch(`${SITE.url}/api/notifications/push`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+  } catch {
+    /* the daily run sends them */
   }
 }
 
@@ -92,7 +106,7 @@ export type Metrics = {
 };
 
 export type OrderRow = Pick<Order, 'id' | 'order_number' | 'email' | 'total' | 'status' | 'payment_status' | 'created_at'> & {
-  customer_name?: string; item_count?: number;
+  customer_name?: string; item_count?: number; ship_date?: string; is_wholesale?: boolean;
 };
 
 export async function getOverview(days = 30) {
@@ -114,18 +128,20 @@ export async function getOverview(days = 30) {
 // ---------------------------------------------------------------------------------------------------------------
 // Orders
 
-export async function listOrders({ status, q, page }: { status: OrderStatus | null; q: string; page: number }) {
+export async function listOrders({ status, q, page, batch }: { status: OrderStatus | null; q: string; page: number; batch?: string | null }) {
   let query = supabase.from('orders')
-    .select('id, order_number, email, total, status, payment_status, created_at, shipping_address, items:order_items(quantity)', { count: 'exact' })
+    .select('id, order_number, email, total, status, payment_status, created_at, ship_date, is_wholesale, shipping_address, items:order_items(quantity)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(page * ORDERS_PER_PAGE, (page + 1) * ORDERS_PER_PAGE - 1);
   if (status) query = query.eq('status', status);
+  if (batch) query = query.eq('ship_date', batch);
   const s = clean(q);
   if (s) query = query.or(`order_number.ilike.%${s}%,email.ilike.%${s}%`);
   const { data, count, error } = await query;
   if (error) fail(error, 'Could not load orders');
   const rows: OrderRow[] = (data ?? []).map((o) => ({
     id: o.id, order_number: o.order_number, email: o.email, total: Number(o.total), status: o.status, payment_status: o.payment_status, created_at: o.created_at,
+    ship_date: o.ship_date, is_wholesale: o.is_wholesale,
     customer_name: (o.shipping_address as { full_name?: string } | null)?.full_name,
     item_count: ((o.items ?? []) as { quantity: number }[]).reduce((n, i) => n + i.quantity, 0),
   }));
@@ -143,6 +159,46 @@ export async function getOrder(id: string) {
   return { order, customer };
 }
 
+// Shipping batches (0014): goods leave China on the 14th and 28th.
+// Order flow: confirmed (paid) → processing ("Packed", in the warehouse) → shipped ("In transit") → delivered.
+
+export type BatchBoard = {
+  due: string; ready: number; late: number;
+  upcoming: string; packed: number; awaiting: number;
+};
+
+/** The batch due now (to dispatch) and the one the warehouse is filling. */
+export async function getBatchBoard(): Promise<BatchBoard> {
+  const due = currentBatchDate();
+  const upcoming = upcomingBatchDate();
+  const n = () => supabase.from('orders').select('id', { count: 'exact', head: true });
+  const [ready, late, packed, awaiting] = await Promise.all([
+    n().eq('status', 'processing').lte('ship_date', due),
+    n().in('status', ['pending', 'confirmed']).lte('ship_date', due),
+    n().eq('status', 'processing').eq('ship_date', upcoming),
+    n().in('status', ['pending', 'confirmed']).eq('ship_date', upcoming),
+  ]);
+  if (ready.error) fail(ready.error, 'Could not load shipping batches');
+  return { due, ready: ready.count ?? 0, late: late.count ?? 0, upcoming, packed: packed.count ?? 0, awaiting: awaiting.count ?? 0 };
+}
+
+const isBatchDate = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && SHIP_DAYS.includes(Number(d.slice(8, 10)));
+
+/** Close a batch: packed orders go in transit; orders not yet in the warehouse roll to the next batch. */
+export async function dispatchBatch(date: string): Promise<{ shipped: number; rolled: number }> {
+  if (!isBatchDate(date)) throw new AdminError('Batches ship on the 14th and 28th.');
+  const { data, error } = await supabase.rpc('admin_dispatch_batch', { p_date: date }).single<{ shipped: number; rolled: number }>();
+  if (error) fail(error, "We couldn't dispatch this batch.");
+  return data!;
+}
+
+/** Move one order to another batch (e.g. the supplier is late delivering to the warehouse). */
+export async function setOrderShipDate(id: string, date: string) {
+  if (!isBatchDate(date)) throw new AdminError('Batches ship on the 14th and 28th.');
+  const { error } = await supabase.from('orders').update({ ship_date: date }).eq('id', id);
+  if (error) fail(error, "We couldn't reschedule this order.");
+}
+
 export async function updateOrderStatus(id: string, status: OrderStatus) {
   if (!ORDER_STATUSES.includes(status)) throw new AdminError('Unknown status');
   const update: Record<string, string> = { status };
@@ -158,11 +214,12 @@ export type ProductFilter = 'all' | 'active' | 'draft' | 'low' | 'sale';
 export type ProductRow = {
   id: string; name: string; slug: string; brand: string; price: number; compare_at_price: number | null; stock_quantity: number;
   is_active: boolean; is_featured: boolean; sales_count: number; category: string | null; image: string | null; variant_count: number;
+  sale_mode: SaleMode; wholesale_price: number | null; wholesale_min_qty: number;
 };
 
 export async function listProducts({ q, filter, page }: { q: string; filter: ProductFilter; page: number }) {
   let query = supabase.from('products')
-    .select('id, name, slug, brand, price, compare_at_price, stock_quantity, is_active, is_featured, sales_count, category:categories(name), images:product_images(image_url, sort_order), variants:product_variants(id)', { count: 'exact' })
+    .select('id, name, slug, brand, price, compare_at_price, sale_mode, wholesale_price, wholesale_min_qty, stock_quantity, is_active, is_featured, sales_count, category:categories(name), images:product_images(image_url, sort_order), variants:product_variants(id)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(page * PRODUCTS_PER_PAGE, (page + 1) * PRODUCTS_PER_PAGE - 1);
   const s = clean(q);
@@ -180,6 +237,9 @@ export async function listProducts({ q, filter, page }: { q: string; filter: Pro
     category: (p.category as unknown as { name: string } | null)?.name ?? null,
     image: [...((p.images ?? []) as { image_url: string; sort_order: number }[])].sort((a, b) => a.sort_order - b.sort_order)[0]?.image_url ?? null,
     variant_count: (p.variants ?? []).length,
+    sale_mode: (p.sale_mode ?? 'retail') as SaleMode,
+    wholesale_price: p.wholesale_price == null ? null : Number(p.wholesale_price),
+    wholesale_min_qty: Number(p.wholesale_min_qty ?? 1),
   }));
   return { rows, total: count ?? 0 };
 }
@@ -200,6 +260,10 @@ export async function getProduct(id: string): Promise<Product | null> {
     ...p,
     price: Number(p.price),
     compare_at_price: p.compare_at_price == null ? null : Number(p.compare_at_price),
+    sale_mode: p.sale_mode ?? 'retail',
+    wholesale_price: p.wholesale_price == null ? null : Number(p.wholesale_price),
+    wholesale_min_qty: Number(p.wholesale_min_qty ?? 10),
+    ...('group_size' in p ? { group_price: p.group_price == null ? null : Number(p.group_price), group_size: Number(p.group_size ?? 2) } : {}),
     weight_kg: Number(p.weight_kg ?? 0.5), length_cm: Number(p.length_cm ?? 20), width_cm: Number(p.width_cm ?? 15), height_cm: Number(p.height_cm ?? 10),
     shipping_methods: p.shipping_methods ?? ['standard', 'express', 'sea'],
     images: [...(p.images ?? [])].sort((a, b) => a.sort_order - b.sort_order),
@@ -214,6 +278,13 @@ export type ProductPayload = {
   weight_kg: number; length_cm: number; width_cm: number; height_cm: number; shipping_methods: DeliveryMethod[];
   images: { image_url: string; alt_text: string }[];
   variants: { id?: string; name: string; value: string; additional_price: number; stock_quantity: number; image_url?: string | null }[];
+  /** Group deal; leave undefined on databases without 0013_engagement.sql. null removes the deal. */
+  group_price?: number | null;
+  group_size?: number;
+  /** Retail (personal buyers), wholesale (business accounts, in bulk) or both (0015). */
+  sale_mode: SaleMode;
+  wholesale_price: number | null;
+  wholesale_min_qty: number;
 };
 
 /** Same rules as the website's productSchema. Returns an error message, or null when valid. */
@@ -222,6 +293,11 @@ function validateProduct(p: ProductPayload): string | null {
   if (p.name.length > 160) return 'Name is too long';
   if (!(p.price >= 0) || p.price > 1_000_000_000) return 'Price must be a positive number';
   if (p.compare_at_price != null && !(p.compare_at_price >= 0)) return 'Compare-at price must be positive';
+  if (p.group_price != null && !(p.group_price > 0 && p.group_price < p.price)) return 'Group price must be above 0 and below the price';
+  if (p.sale_mode !== 'retail' && !(p.wholesale_price != null && p.wholesale_price > 0)) return 'Set a wholesale price, or sell this product retail only';
+  if (p.sale_mode === 'both' && p.wholesale_price! >= p.price) return 'The wholesale price must be lower than the retail price';
+  if (!Number.isInteger(p.wholesale_min_qty) || p.wholesale_min_qty < 1 || p.wholesale_min_qty > 10000) return 'Minimum order must be 1 to 10,000 units';
+  if (p.group_size != null && !(Number.isInteger(p.group_size) && p.group_size >= 2 && p.group_size <= 5)) return 'A group needs 2 to 5 people';
   if (!Number.isInteger(p.stock_quantity) || p.stock_quantity < 0) return 'Stock must be a whole number';
   if (!(p.weight_kg > 0) || p.weight_kg > 5000) return 'Weight must be greater than 0';
   for (const [k, v] of [['Length', p.length_cm], ['Width', p.width_cm], ['Height', p.height_cm]] as const) {
@@ -231,6 +307,8 @@ function validateProduct(p: ProductPayload): string | null {
   if (p.images.length > 12) return 'Use at most 12 images';
   if (p.details.length > 20) return 'Use at most 20 highlights';
   if (p.variants.length > 50) return 'Use at most 50 variants';
+  // Rows like "800k: standard" + "398000K: ultimate" would show as separate options shoppers can't combine.
+  if (!consistentOptions(p.variants)) return 'Every option row needs the same option name. Put the shared name (e.g. "Model") in Option and the choice (e.g. "800k Standard") in Value.';
   for (const v of p.variants) {
     if (!v.name.trim() || !v.value.trim()) return 'Every variant needs an option and a value';
     if (!Number.isInteger(v.stock_quantity) || v.stock_quantity < 0) return 'Variant stock must be a whole number';
@@ -240,9 +318,14 @@ function validateProduct(p: ProductPayload): string | null {
 }
 
 export async function saveProduct(payload: ProductPayload): Promise<string> {
+  // Wholesale only: the listed price is the wholesale price and retail-only extras don't apply.
+  if (payload.sale_mode === 'wholesale' && payload.wholesale_price != null) {
+    payload = { ...payload, price: payload.wholesale_price, compare_at_price: null, ...(payload.group_price !== undefined ? { group_price: null } : {}) };
+  }
+  if (payload.sale_mode === 'retail') payload = { ...payload, wholesale_price: null };
   const invalid = validateProduct(payload);
   if (invalid) throw new AdminError(invalid);
-  const { id, images, variants, ...p } = payload;
+  const { id, images, variants, group_price, group_size, ...p } = payload;
   const row = {
     ...p,
     name: p.name.trim(),
@@ -292,7 +375,15 @@ export async function saveProduct(payload: ProductPayload): Promise<string> {
       if (error) throw error;
     }
 
+    if (group_price !== undefined) {
+      const { error } = await supabase.from('products').update({ group_price, group_size: group_size ?? 2 }).eq('id', productId!);
+      if (error?.code === '42703') {
+        if (group_price != null) throw new AdminError('Group buying needs the 0013_engagement.sql migration. Run it in Supabase first.');
+      } else if (error) throw error;
+    }
+
     void refreshStore();
+    void flushPushes();
     return productId!;
   } catch (e) {
     fail(e, "We couldn't save this product.");
@@ -388,12 +479,12 @@ export async function reorderCategories(ids: string[]) {
 // ---------------------------------------------------------------------------------------------------------------
 // Customers
 
-export type CustomerRow = Pick<Profile, 'user_id' | 'full_name' | 'email' | 'role' | 'status' | 'created_at'> & { orders: number; spent: number };
+export type CustomerRow = Pick<Profile, 'user_id' | 'full_name' | 'email' | 'role' | 'status' | 'created_at' | 'account_type' | 'business_name'> & { orders: number; spent: number };
 
 export async function listCustomers(q: string) {
-  let query = supabase.from('profiles').select('user_id, full_name, email, role, status, created_at', { count: 'exact' }).order('created_at', { ascending: false }).limit(100);
+  let query = supabase.from('profiles').select('user_id, full_name, email, role, status, created_at, account_type, business_name', { count: 'exact' }).order('created_at', { ascending: false }).limit(100);
   const s = clean(q);
-  if (s) query = query.or(`full_name.ilike.%${s}%,email.ilike.%${s}%`);
+  if (s) query = query.or(`full_name.ilike.%${s}%,email.ilike.%${s}%,business_name.ilike.%${s}%`);
   const { data, count, error } = await query;
   if (error) fail(error, 'Could not load customers');
   const ids = (data ?? []).map((c) => c.user_id);
@@ -447,7 +538,8 @@ export async function listCoupons(): Promise<Coupon[]> {
   ]);
   if (error) fail(error, 'Could not load discounts');
   const stats = new Map(((report.data ?? []) as (CouponStats & { id: string })[]).map((r) => [r.id, r]));
-  return ((data ?? []) as Coupon[]).map((c) => {
+  // Shoppers' personal reward codes (check-in streaks, 0013) aren't staff codes.
+  return ((data ?? []) as (Coupon & { owner_user_id?: string | null })[]).filter((c) => !c.owner_user_id).map((c) => {
     const st = stats.get(c.id);
     return {
       ...c, value: Number(c.value), min_subtotal: Number(c.min_subtotal),
@@ -588,4 +680,78 @@ export async function bulkDelete(kind: BulkKind, ids: string[]): Promise<number>
   if (error) fail(error, "We couldn't delete these items.");
   if (kind !== 'coupons') void refreshStore();
   return Number(data ?? 0);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// AI import: screenshots → product drafts (runs on the website's server, which holds the Gemini key)
+
+export type AiDraft = {
+  name: string; slug: string; description: string; details: string[]; specifications: Record<string, string>;
+  category_id: string | null; price: number; compare_at_price: number | null; stock_quantity: number;
+  weight_kg: number; length_cm: number; width_cm: number; height_cm: number;
+  images: { image_url: string; alt_text: string }[];
+  variants: { name: string; value: string; additional_price: number; stock_quantity: number; image_url: string | null }[];
+  source: { price_cny: number; original_price_cny: number | null; screenshots: number[] };
+  warnings: string[];
+};
+export type AiImportResult = {
+  products: AiDraft[];
+  pricing: { rate: number; rateSource: 'live' | 'fallback'; rateUpdatedAt: string | null; multiplier: number; rounding: number };
+};
+
+export async function aiImport(assets: { uri: string; mimeType?: string | null; fileName?: string | null }[]): Promise<AiImportResult> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new AdminError('Sign in again.');
+  const body = new FormData();
+  for (const [i, a] of assets.entries()) {
+    const type = a.mimeType ?? 'image/jpeg';
+    const name = a.fileName ?? `screenshot-${i + 1}.${type.split('/')[1] ?? 'jpg'}`;
+    if (Platform.OS === 'web') body.append('images', await (await fetch(a.uri)).blob(), name);
+    // React Native's FormData takes a { uri, name, type } descriptor for files.
+    else body.append('images', { uri: a.uri, name, type } as unknown as Blob);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${SITE.url}/api/admin/ai-import`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body });
+  } catch {
+    throw new AdminError(`Can't reach ${SITE.url}. Check your connection (and EXPO_PUBLIC_SITE_URL).`);
+  }
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AdminError((json as { error?: string }).error ?? 'The import failed.');
+  return json as AiImportResult;
+}
+
+// App rewards (0013): daily check-in streak reward and group deal timing ---------------------------
+
+export type EngagementSettings = {
+  checkin_enabled: boolean; checkin_cycle: number; checkin_reward_type: 'percentage' | 'fixed'; checkin_reward_value: number;
+  checkin_min_subtotal: number; checkin_coupon_days: number; group_hours: number; group_price_days: number;
+};
+
+/** Whether the database has group deals (0013_engagement.sql). */
+export async function groupDealsAvailable() {
+  const { error } = await supabase.from('products').select('group_price').limit(1);
+  return !error;
+}
+
+/** null when the database doesn't have 0013_engagement.sql yet. */
+export async function getEngagementSettings(): Promise<EngagementSettings | null> {
+  const { data, error } = await supabase.from('engagement_settings').select('*').maybeSingle();
+  if (error || !data) return null;
+  return { ...data, checkin_reward_value: Number(data.checkin_reward_value), checkin_min_subtotal: Number(data.checkin_min_subtotal) } as EngagementSettings;
+}
+
+export async function saveEngagementSettings(s: EngagementSettings) {
+  const whole = (n: number, lo: number, hi: number) => Number.isInteger(n) && n >= lo && n <= hi;
+  if (!whole(s.checkin_cycle, 2, 30)) throw new AdminError('Streak length must be 2 to 30 days');
+  if (!(s.checkin_reward_value > 0)) throw new AdminError('Reward must be greater than 0');
+  if (s.checkin_reward_type === 'percentage' && s.checkin_reward_value > 100) throw new AdminError("Percentage can't exceed 100");
+  if (!(s.checkin_min_subtotal >= 0)) throw new AdminError('Minimum order must be 0 or more');
+  if (!whole(s.checkin_coupon_days, 1, 90)) throw new AdminError('Code validity must be 1 to 90 days');
+  if (!whole(s.group_hours, 1, 168)) throw new AdminError('Groups must fill within 1 to 168 hours');
+  if (!whole(s.group_price_days, 1, 30)) throw new AdminError('Group price window must be 1 to 30 days');
+  const { data, error } = await supabase.from('engagement_settings').update({ ...s, updated_at: new Date().toISOString() }).eq('id', true).select('id');
+  if (error) fail(error, "We couldn't save these settings.");
+  if (!data?.length) throw new AdminError('You need the “Manage discounts” permission.');
 }

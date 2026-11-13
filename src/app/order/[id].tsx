@@ -4,7 +4,8 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { Button, Divider, EmptyState, ErrorState, Skeleton, Text } from '@/components/ui';
 import { Card, CardTitle, confirm, errorMessage, Pill, Row, SelectSheetTrigger, StatusBadge, Thumb, NoAccess } from '@/components/admin';
-import { getOrder, updateOrderStatus } from '@/lib/admin';
+import { getOrder, setOrderShipDate, updateOrderStatus } from '@/lib/admin';
+import { batchDatesAfter, currentBatchDate, formatBatch } from '@/lib/ship-batch';
 import { DELIVERY_LABEL, ORDER_STATUSES, ORDER_STATUS_LABEL } from '@/lib/constants';
 import { formatDate, formatPrice } from '@/lib/format';
 import type { OrderStatus } from '@/lib/types';
@@ -15,8 +16,8 @@ import { useTheme } from '@/theme';
 
 const FLOW: OrderStatus[] = ['pending', 'confirmed', 'processing', 'shipped', 'delivered'];
 const NEXT_HINT: Partial<Record<OrderStatus, string>> = {
-  pending: 'Waiting for payment confirmation', confirmed: 'Paid, ready to source', processing: 'Being packed in China',
-  shipped: 'On its way to Tanzania', delivered: 'Delivered to the customer', cancelled: 'Cancelled and refunded',
+  pending: 'Waiting for payment confirmation', confirmed: 'Paid, waiting for goods at the China warehouse', processing: 'In the China warehouse, waiting for its batch',
+  shipped: 'Batch has left China, on its way to Tanzania', delivered: 'Delivered to the customer', cancelled: 'Cancelled and refunded',
 };
 
 export default function OrderDetail() {
@@ -31,6 +32,7 @@ function OrderDetailScreen() {
   const toast = useToast();
   const data = useAsync(() => getOrder(id), [id]);
   const [saving, setSaving] = useState(false);
+  const [rescheduling, setRescheduling] = useState(false);
 
   if (data.error && !data.data) return <ErrorState onRetry={data.reload} message={data.error?.message} />;
   if (data.loading) return <View style={{ padding: 16, gap: 12 }}><Skeleton style={{ height: 120 }} /><Skeleton style={{ height: 220 }} /><Skeleton style={{ height: 160 }} /></View>;
@@ -55,6 +57,23 @@ function OrderDetailScreen() {
     }
   }
 
+  async function changeBatch(date: string) {
+    if (date === order.ship_date) return;
+    setRescheduling(true);
+    try {
+      await setOrderShipDate(order.id, date);
+      toast({ title: `Moved to the ${formatBatch(date)} batch`, tone: 'success' });
+      data.reload();
+    } catch (e) {
+      toast({ title: errorMessage(e), tone: 'error' });
+    } finally {
+      setRescheduling(false);
+    }
+  }
+  const shipped = order.status === 'shipped' || order.status === 'delivered';
+  const canReschedule = can('orders.update') && ['pending', 'confirmed', 'processing'].includes(order.status) && order.ship_date;
+  const batchOptions = order.ship_date ? [...new Set([order.ship_date, ...batchDatesAfter(currentBatchDate(), 4)])].sort() : [];
+
   const phone = a.phone?.replace(/[^\d+]/g, '');
   return (
     <>
@@ -68,6 +87,7 @@ function OrderDetailScreen() {
               <Text style={{ fontSize: 26, lineHeight: 32, fontWeight: '700', fontVariant: ['tabular-nums'] }}>{formatPrice(order.total)}</Text>
               <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
                 <StatusBadge status={order.status} />
+                {order.is_wholesale ? <Pill label="Wholesale" tone="info" /> : null}
                 <Pill label={`Payment ${order.payment_status}`} tone={order.payment_status === 'paid' ? 'success' : order.payment_status === 'refunded' ? 'sale' : 'muted'} />
               </View>
             </View>
@@ -115,6 +135,21 @@ function OrderDetailScreen() {
             </View>
           )}
         </Card>
+
+        {/* Shipping batch */}
+        {order.ship_date && order.status !== 'cancelled' ? (
+          <Card style={{ gap: 10 }}>
+            <CardTitle title="Shipping batch" icon="anchor" />
+            <Text>{shipped ? 'Left China with the ' : 'Ships with the '}<Text style={{ fontWeight: '700' }}>{formatBatch(order.ship_date, { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' })}</Text> batch</Text>
+            <Text variant="small" tone="muted">Batches leave on the 14th and 28th. Orders placed at least 12 days before a batch join it.</Text>
+            {canReschedule ? (
+              <SelectSheetTrigger label="Move to batch" value={order.ship_date} onChange={changeBatch}
+                options={batchOptions.map((d) => ({ value: d, label: formatBatch(d, { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' }), hint: d === order.ship_date ? 'Current batch' : undefined }))}>
+                {(open) => <Button size="sm" variant="secondary" icon="calendar" title="Move to another batch" onPress={open} loading={rescheduling} />}
+              </SelectSheetTrigger>
+            ) : null}
+          </Card>
+        ) : null}
 
         {/* Items & totals */}
         <Card padded={false}>

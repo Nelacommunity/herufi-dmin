@@ -1,5 +1,8 @@
 export type OrderStatus = "pending" | "confirmed" | "processing" | "shipped" | "delivered" | "cancelled";
 export type DeliveryMethod = "standard" | "express" | "sea";
+/** Who can buy a product (0015): personal buyers, business accounts in bulk, or both. */
+export type SaleMode = "retail" | "wholesale" | "both";
+export type AccountType = "personal" | "business";
 
 export interface Category {
   id: string;
@@ -50,6 +53,9 @@ export interface ProductSummary {
 }
 
 export interface Product extends ProductSummary {
+  /** Group deal (0013). Absent on databases without group buying. */
+  group_price?: number | null;
+  group_size?: number;
   description: string;
   details: string[];
   specifications: Record<string, string>;
@@ -63,6 +69,9 @@ export interface Product extends ProductSummary {
   height_cm: number;
   volume_cbm: number;
   shipping_methods: DeliveryMethod[];
+  sale_mode?: SaleMode;
+  wholesale_price?: number | null;
+  wholesale_min_qty?: number;
 }
 
 /** One priced option from the shipping_options / quote_order database functions. */
@@ -168,6 +177,9 @@ export interface Order {
   total: number;
   coupon_code: string | null;
   delivery_method: DeliveryMethod;
+  /** Batch date (YYYY-MM-DD) the order leaves the China warehouse (0014). */
+  ship_date?: string;
+  is_wholesale?: boolean;
   shipping_saved?: number;
   shipping_address: Omit<Address, "id" | "label" | "is_default">;
   payment_method: { brand?: string; last4?: string };
@@ -187,6 +199,9 @@ export interface Profile {
   phone: string | null;
   role: "customer" | "admin" | "super_admin";
   status: "active" | "suspended";
+  account_type?: AccountType;
+  business_name?: string | null;
+  business_tin?: string | null;
   permissions?: string[];
   marketing_opt_in: boolean;
   created_at: string;

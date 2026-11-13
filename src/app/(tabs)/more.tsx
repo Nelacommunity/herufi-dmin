@@ -21,6 +21,7 @@ export default function More() {
 
   const items: Item[] = [
     { icon: 'shield', label: 'Staff', hint: 'Admins, super admins and permissions', href: '/staff', show: isSuper },
+    { icon: 'zap', label: 'AI import', hint: 'Screenshots → products, priced in TSh', href: '/ai-import', show: can('products.create') },
     { icon: 'folder', label: 'Categories', hint: 'Order, images and names', href: '/categories', show: can('categories.manage') },
     { icon: 'percent', label: 'Discounts', hint: can('discounts.manage') ? 'Codes, owners and sales per code' : 'Your codes and their orders', href: '/discounts', show: true },
     { icon: 'anchor', label: 'Shipping rates', hint: 'Air, express and sea cargo', href: '/shipping', show: can('shipping.manage') },

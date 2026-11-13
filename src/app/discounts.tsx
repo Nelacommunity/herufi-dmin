@@ -4,7 +4,7 @@ import { router, Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button, Divider, EmptyState, ErrorState, IconButton, Input, Sheet, Skeleton, Text } from '@/components/ui';
 import { Card, CardTitle, confirm, errorMessage, Pill, SelectCircle, SelectField, SelectionBar, SwitchRow, useSelection } from '@/components/admin';
-import { bulkDelete, couponState, deleteCoupon, listCoupons, listStaff, saveCoupon, type Coupon, type StaffMember } from '@/lib/admin';
+import { bulkDelete, couponState, deleteCoupon, getEngagementSettings, listCoupons, listStaff, saveCoupon, saveEngagementSettings, type Coupon, type EngagementSettings, type StaffMember } from '@/lib/admin';
 import { useSession } from '@/providers/session';
 import { formatDate, formatPrice } from '@/lib/format';
 import { useAsync } from '@/lib/use-async';
@@ -21,9 +21,12 @@ export default function Discounts() {
   const [deleting, setDeleting] = useState(false);
   const manage = can('discounts.manage');
   const data = useAsync(async () => {
-    const [coupons, staff] = await Promise.all([listCoupons(), isSuper ? listStaff() : Promise.resolve([] as StaffMember[])]);
-    return { coupons, staff };
-  }, [isSuper]);
+    const [coupons, staff, rewards] = await Promise.all([
+      listCoupons(), isSuper ? listStaff() : Promise.resolve([] as StaffMember[]),
+      manage ? getEngagementSettings() : Promise.resolve(null),
+    ]);
+    return { coupons, staff, rewards };
+  }, [isSuper, manage]);
   const [editing, setEditing] = useState<Coupon | 'new' | null>(null);
   // Super admins edit any code; admins with discounts.manage only codes assigned to them (RLS enforces the same).
   const editable = (c: Coupon) => manage && (isSuper || c.assigned_admin_id === profile?.user_id);
@@ -122,6 +125,7 @@ export default function Discounts() {
             </Card>
           ) : <EmptyState icon="percent" title="No discount codes" description={manage ? 'Create a code customers can enter at checkout.' : 'No codes are assigned to you yet.'}
             action={manage ? <Button title="Create discount" icon="plus" onPress={() => setEditing('new')} /> : undefined} />}
+          {data.data?.rewards && !sel.active ? <RewardsCard key={JSON.stringify(data.data.rewards)} initial={data.data.rewards} onSaved={data.reload} /> : null}
         </ScrollView>
       )}
       {sel.active && (
@@ -205,5 +209,55 @@ function CouponForm({ coupon, staff, onDone }: { coupon: Coupon | null; staff: S
       {error ? <Text tone="sale">{error}</Text> : null}
       <Button size="lg" title="Save discount" onPress={save} loading={saving} />
     </ScrollView>
+  );
+}
+
+/** Daily check-in reward and group deal timing (engagement_settings). */
+function RewardsCard({ initial, onSaved }: { initial: EngagementSettings; onSaved: () => void }) {
+  const toast = useToast();
+  const [s, setS] = useState(() => ({
+    ...initial, cycle: String(initial.checkin_cycle), value: String(initial.checkin_reward_value), min: String(initial.checkin_min_subtotal),
+    days: String(initial.checkin_coupon_days), hours: String(initial.group_hours), window: String(initial.group_price_days),
+  }));
+  const [saving, setSaving] = useState(false);
+  const set = (patch: Partial<typeof s>) => setS((x) => ({ ...x, ...patch }));
+  const digits = (t: string) => t.replace(/[^\d.]/g, '');
+  async function save() {
+    setSaving(true);
+    try {
+      await saveEngagementSettings({
+        checkin_enabled: s.checkin_enabled, checkin_cycle: Number(s.cycle), checkin_reward_type: s.checkin_reward_type,
+        checkin_reward_value: Number(s.value), checkin_min_subtotal: Number(s.min || 0), checkin_coupon_days: Number(s.days),
+        group_hours: Number(s.hours), group_price_days: Number(s.window),
+      });
+      toast({ title: 'Rewards updated', tone: 'success' });
+      onSaved();
+    } catch (e) {
+      toast({ title: errorMessage(e), tone: 'error' });
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Card style={{ gap: 12 }}>
+      <CardTitle title="App rewards" icon="gift" />
+      <Text variant="small" tone="muted">Shoppers who check in every day earn a personal, single-use code at the end of each streak. Group deals are set per product.</Text>
+      <SwitchRow label="Daily check-in" hint="Show the streak card in the app" value={s.checkin_enabled} onValueChange={(v) => set({ checkin_enabled: v })} />
+      <View style={{ flexDirection: 'row', gap: 10 }}>
+        <Input label="Streak (days)" value={s.cycle} onChangeText={(t) => set({ cycle: t.replace(/\D/g, '') })} keyboardType="number-pad" containerStyle={{ flex: 1 }} />
+        <Input label="Code valid (days)" value={s.days} onChangeText={(t) => set({ days: t.replace(/\D/g, '') })} keyboardType="number-pad" containerStyle={{ flex: 1 }} />
+      </View>
+      <SelectField label="Reward type" value={s.checkin_reward_type} onChange={(v) => { if (v) set({ checkin_reward_type: v }); }}
+        options={[{ value: 'fixed', label: 'Amount off (TSh)' }, { value: 'percentage', label: 'Percent off' }]} />
+      <View style={{ flexDirection: 'row', gap: 10 }}>
+        <Input label={s.checkin_reward_type === 'fixed' ? 'Reward (TSh)' : 'Reward (%)'} value={s.value} onChangeText={(t) => set({ value: digits(t) })} keyboardType="decimal-pad" containerStyle={{ flex: 1 }} />
+        <Input label="Minimum order (TSh)" value={s.min} onChangeText={(t) => set({ min: digits(t) })} keyboardType="decimal-pad" containerStyle={{ flex: 1 }} />
+      </View>
+      <View style={{ flexDirection: 'row', gap: 10 }}>
+        <Input label="Group fills within (h)" value={s.hours} onChangeText={(t) => set({ hours: t.replace(/\D/g, '') })} keyboardType="number-pad" containerStyle={{ flex: 1 }} />
+        <Input label="Group price for (days)" value={s.window} onChangeText={(t) => set({ window: t.replace(/\D/g, '') })} keyboardType="number-pad" containerStyle={{ flex: 1 }} />
+      </View>
+      <Button title="Save rewards" loading={saving} onPress={save} />
+    </Card>
   );
 }

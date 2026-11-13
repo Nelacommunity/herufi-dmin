@@ -66,9 +66,16 @@ function CustomerDetailScreen() {
               <View style={{ flexDirection: 'row', gap: 6 }}>
                 <Pill label={suspended ? 'Suspended' : 'Active'} tone={suspended ? 'sale' : 'success'} />
                 {c.role !== 'customer' && <Pill label={ROLE_LABEL[c.role as StaffRole] ?? c.role} tone="dark" />}
+                <Pill label={c.account_type === 'business' ? 'Business' : 'Personal'} tone={c.account_type === 'business' ? 'info' : 'muted'} />
               </View>
             </View>
           </View>
+          {c.account_type === 'business' ? (
+            <View style={{ gap: 2 }}>
+              <Text variant="label">{c.business_name}</Text>
+              <Text variant="small" tone="muted">{c.business_tin ? `TIN ${c.business_tin}` : 'No TIN given'} · buys wholesale</Text>
+            </View>
+          ) : null}
           <Text variant="small" tone="muted">Joined {formatDate(c.created_at, 'en', 'long')}</Text>
           <View style={{ flexDirection: 'row', gap: 8 }}>
             {c.email ? <Button size="sm" variant="secondary" icon="mail" title="Email" style={{ flex: 1 }} onPress={() => Linking.openURL(`mailto:${c.email}`)} /> : null}

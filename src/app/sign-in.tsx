@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -7,11 +7,13 @@ import { Card } from '@/components/admin';
 import { supabase } from '@/lib/supabase';
 import { useSession } from '@/providers/session';
 import { useTheme } from '@/theme';
+import { Turnstile, turnstileRequired, type TurnstileHandle } from '@/components/turnstile';
 
 function friendly(message: string) {
   if (/invalid login credentials/i.test(message)) return 'Wrong email or password.';
   if (/email not confirmed/i.test(message)) return 'Confirm your email address first, then sign in.';
   if (/rate limit|too many/i.test(message)) return 'Too many attempts. Wait a minute and try again.';
+  if (/captcha/i.test(message)) return 'Complete the security check, then try again.';
   return message;
 }
 
@@ -23,14 +25,18 @@ export default function SignIn() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [captcha, setCaptcha] = useState<string | null>(null);
+  const turnstile = useRef<TurnstileHandle>(null);
 
   async function submit() {
     setError(null);
     if (!/^\S+@\S+\.\S+$/.test(email.trim())) return setError('Enter a valid email address.');
     if (!password) return setError('Enter your password.');
+    if (turnstileRequired && !captcha) return setError('Complete the security check first.');
     setBusy(true);
-    const { error: e } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    const { error: e } = await supabase.auth.signInWithPassword({ email: email.trim(), password, options: { captchaToken: captcha ?? undefined } });
     setBusy(false);
+    turnstile.current?.reset(); // each token works once
     if (e) setError(friendly(e.message));
   }
 
@@ -64,10 +70,11 @@ export default function SignIn() {
               <Text variant="title">Sign in</Text>
               <Text tone="muted">Use your Herufi admin account. Orders, products, customers, discounts and shipping, all from your phone.</Text>
             </View>
-            <Input label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoComplete="email" keyboardType="email-address" textContentType="username" placeholder="you@herufi.co.tz" />
+            <Input label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" autoComplete="email" keyboardType="email-address" textContentType="username" placeholder="you@herufi.shop" />
             <Input label="Password" value={password} onChangeText={setPassword} secureTextEntry autoComplete="current-password" textContentType="password" onSubmitEditing={submit} returnKeyType="go" />
+            <Turnstile ref={turnstile} onToken={setCaptcha} />
             {error ? <Text tone="sale">{error}</Text> : null}
-            <Button size="lg" title="Sign in" onPress={submit} loading={busy} />
+            <Button size="lg" title="Sign in" onPress={submit} loading={busy} disabled={turnstileRequired && !captcha} />
             <Text variant="small" tone="subtle" style={{ textAlign: 'center' }}>Forgot your password? Reset it on the Herufi website.</Text>
           </View>
         )}

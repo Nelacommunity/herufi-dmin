@@ -21,13 +21,33 @@ export function optionsOf(v: Pick<VariantLike, "name" | "value">): { name: strin
   return names.map((name, i) => ({ name, value: values[i] }));
 }
 
-const optionValue = (v: VariantLike, name: string) => optionsOf(v).find((o) => o.name === name)?.value;
+/**
+ * Name of the single option used when a product's variants don't share the same option names, e.g. rows saved as
+ * "800k: standard", "398000K: ultimate". Read separately those would be three options with one choice each that no
+ * variant can satisfy together, so they're offered as one list instead ("800k · standard", ...).
+ */
+export const MIXED_OPTION = "Option";
+
+function mixed(variants: Pick<VariantLike, "name" | "value">[]) {
+  const keys = new Set(variants.map((v) => optionsOf(v).map((o) => o.name).join(OPTION_SEP)));
+  return keys.size > 1;
+}
+
+/** Whether every variant uses the same option names (what the admin editors require). */
+export const consistentOptions = (variants: Pick<VariantLike, "name" | "value">[]) => !mixed(variants);
+
+/** A variant's options in the context of its product (see MIXED_OPTION). */
+function optionsIn(variants: Pick<VariantLike, "name" | "value">[], v: Pick<VariantLike, "name" | "value">) {
+  return mixed(variants) ? [{ name: MIXED_OPTION, value: `${v.name.trim()} · ${v.value.trim()}` }] : optionsOf(v);
+}
+
+const optionValue = (variants: VariantLike[], v: VariantLike, name: string) => optionsIn(variants, v).find((o) => o.name === name)?.value;
 
 /** Option groups (in the order they first appear) with their values (in variant order). */
 export function optionGroups(variants: VariantLike[]): OptionGroup[] {
   const groups: OptionGroup[] = [];
   for (const v of variants) {
-    for (const o of optionsOf(v)) {
+    for (const o of optionsIn(variants, v)) {
       let g = groups.find((x) => x.name === o.name);
       if (!g) groups.push((g = { name: o.name, values: [] }));
       if (!g.values.includes(o.value)) g.values.push(o.value);
@@ -38,7 +58,7 @@ export function optionGroups(variants: VariantLike[]): OptionGroup[] {
 
 /** Variants matching every chosen option (ignoring `except`, if given). */
 function matching(variants: VariantLike[], sel: Selection, except?: string) {
-  return variants.filter((v) => Object.entries(sel).every(([name, value]) => name === except || optionValue(v, name) === value));
+  return variants.filter((v) => Object.entries(sel).every(([name, value]) => name === except || optionValue(variants, v, name) === value));
 }
 
 /** The exact variant for a selection, once every option is chosen. */
@@ -53,7 +73,7 @@ export function findVariant(variants: VariantLike[], sel: Selection): VariantLik
  * "available", "soldout" (the combination exists but has no stock) or "unavailable" (it doesn't exist).
  */
 export function valueState(variants: VariantLike[], sel: Selection, name: string, value: string): ValueState {
-  const candidates = matching(variants, sel, name).filter((v) => optionValue(v, name) === value);
+  const candidates = matching(variants, sel, name).filter((v) => optionValue(variants, v, name) === value);
   if (!candidates.length) return "unavailable";
   return candidates.some((v) => v.stock_quantity > 0) ? "available" : "soldout";
 }
@@ -70,7 +90,7 @@ export function selectValue(variants: VariantLike[], sel: Selection, name: strin
 
 /** Starting selection: options with only one value (or a product with a single variant) are pre-chosen. */
 export function initialSelection(variants: VariantLike[]): Selection {
-  if (variants.length === 1) return Object.fromEntries(optionsOf(variants[0]).map((o) => [o.name, o.value]));
+  if (variants.length === 1) return Object.fromEntries(optionsIn(variants, variants[0]).map((o) => [o.name, o.value]));
   return Object.fromEntries(optionGroups(variants).filter((g) => g.values.length === 1).map((g) => [g.name, g.values[0]]));
 }
 
@@ -98,7 +118,7 @@ export const validOptionText = (s: string) => s.trim().length > 0 && !s.includes
  */
 export function photoOption(variants: VariantLike[]): string | null {
   for (const g of optionGroups(variants)) {
-    const photos = g.values.map((value) => new Set(variants.filter((v) => v.image_url && optionValue(v, g.name) === value).map((v) => v.image_url)));
+    const photos = g.values.map((value) => new Set(variants.filter((v) => v.image_url && optionValue(variants, v, g.name) === value).map((v) => v.image_url)));
     if (photos.every((s) => s.size <= 1) && new Set(photos.flatMap((s) => [...s])).size > 1) return g.name;
   }
   return null;
@@ -106,11 +126,11 @@ export function photoOption(variants: VariantLike[]): string | null {
 
 /** The photo for one value of the photo option (e.g. the "Red" thumbnail). */
 export function photoForValue(variants: VariantLike[], name: string, value: string): string | null {
-  return variants.find((v) => v.image_url && optionValue(v, name) === value)?.image_url ?? null;
+  return variants.find((v) => v.image_url && optionValue(variants, v, name) === value)?.image_url ?? null;
 }
 
 /** Extra price shared by every variant with this value (e.g. size XL is +2,000 in every colour), else null. */
 export function valueExtra(variants: (VariantLike & { additional_price: number })[], name: string, value: string): number | null {
-  const prices = new Set(variants.filter((v) => optionValue(v, name) === value).map((v) => Number(v.additional_price) || 0));
+  const prices = new Set(variants.filter((v) => optionValue(variants, v, name) === value).map((v) => Number(v.additional_price) || 0));
   return prices.size === 1 ? [...prices][0] : null;
 }
